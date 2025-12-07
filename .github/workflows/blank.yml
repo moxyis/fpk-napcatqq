@@ -14,8 +14,15 @@ permissions:
   actions: read
 
 jobs:
-  check-and-build-fpk:  # 修复：job ID改为合法英文（仅字母/下划线/短横线）
+  check-and-build-fpk:
     runs-on: ubuntu-latest
+    env:
+      # ========== 核心配置：修改为你的manifest实际路径 ==========
+      MANIFEST_PATH: "./fpk-napcatqq/manifest"  # 示例：fpk-napcatqq文件夹下的manifest
+      # =========================================================
+      DIGEST_PATH: "./docker-image-digest.txt"  # 哈希记录文件路径（可按需修改）
+      FPK_FOLDER: "./fpk-napcatqq"              # FPK打包文件夹路径
+
     steps:
       # 步骤1：拉取fpk-napcatqq仓库代码
       - name: 拉取代码仓库
@@ -23,7 +30,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # 步骤2：安装依赖 + 下载 fnpack 打包工具（修复验证逻辑）
+      # 步骤2：安装依赖 + 下载 fnpack 打包工具
       - name: 安装依赖并下载fnpack工具
         run: |
           # 安装基础依赖
@@ -35,50 +42,90 @@ jobs:
           wget -O /usr/local/bin/fnpack ${FNPACK_URL}
           chmod +x /usr/local/bin/fnpack
           
-          # 修复验证逻辑：不依赖--version，直接检查文件是否可执行
+          # 验证fnpack是否可执行
           if [ -x /usr/local/bin/fnpack ]; then
             echo "✅ fnpack 安装成功（可执行文件已存在）"
           else
             echo "❌ fnpack 安装失败（文件不可执行或不存在）"
-            ls -l /usr/local/bin/fnpack  # 输出文件信息便于排查
+            ls -l /usr/local/bin/fnpack
             exit 1
           fi
 
-      # 步骤3：读取本地纯文本manifest和哈希记录
-      - name: 读取本地配置（版本+哈希）
-        id: local-config  # 步骤ID保留英文，合法
+      # 步骤3：容错处理manifest/哈希文件（不存在则创建）
+      - name: 检查并初始化配置文件
         run: |
-          # 读取纯文本manifest的version
-          LOCAL_VERSION=$(grep -E '^version=' ./manifest | cut -d'=' -f2)
+          # 处理manifest文件
+          if [ ! -f "${{ env.MANIFEST_PATH }}" ]; then
+            echo "⚠️ 未找到manifest文件（路径：${{ env.MANIFEST_PATH }}），自动创建并初始化版本为0.0.0"
+            # 创建父目录（避免路径不存在）
+            mkdir -p $(dirname "${{ env.MANIFEST_PATH }}")
+            echo "version=0.0.0" > "${{ env.MANIFEST_PATH }}"
+          else
+            echo "✅ manifest文件已存在（路径：${{ env.MANIFEST_PATH }}）"
+            cat "${{ env.MANIFEST_PATH }}"  # 输出文件内容便于排查
+          fi
+          
+          # 处理docker-image-digest.txt文件
+          if [ ! -f "${{ env.DIGEST_PATH }}" ]; then
+            echo "⚠️ 未找到docker-image-digest.txt文件（路径：${{ env.DIGEST_PATH }}），自动创建空文件"
+            touch "${{ env.DIGEST_PATH }}"
+          fi
+
+      # 步骤4：读取本地配置（manifest版本+哈希记录）
+      - name: 读取本地配置（版本+哈希）
+        id: local-config
+        run: |
+          # 读取manifest中的version（强制读取，避免空值）
+          LOCAL_VERSION=$(grep -E '^version=' "${{ env.MANIFEST_PATH }}" | cut -d'=' -f2 || echo "0.0.0")
+          
+          # 处理读取到空值的情况
           if [ -z "${LOCAL_VERSION}" ]; then
-            echo "❌ 未从manifest读取到version字段"
-            exit 1
+            echo "⚠️ manifest中version字段为空，使用默认值0.0.0并更新文件"
+            LOCAL_VERSION="0.0.0"
+            sed -i "s|^version=.*|version=0.0.0|g" "${{ env.MANIFEST_PATH }}"
           fi
           
           # 读取哈希记录
-          LOCAL_DIGEST=$(cat ./docker-image-digest.txt 2>/dev/null || echo "")
+          LOCAL_DIGEST=$(cat "${{ env.DIGEST_PATH }}" 2>/dev/null || echo "")
           
           echo "LOCAL_VERSION=${LOCAL_VERSION}" >> $GITHUB_OUTPUT
           echo "LOCAL_DIGEST=${LOCAL_DIGEST}" >> $GITHUB_OUTPUT
           echo "✅ 本地记录 - 版本: ${LOCAL_VERSION}, 哈希: ${LOCAL_DIGEST}"
 
-      # 步骤4：远程获取Docker镜像最新版本+哈希
+      # 步骤5：远程获取Docker镜像最新版本+哈希（带重试）
       - name: 获取远程Docker镜像信息
-        id: remote-docker  # 步骤ID保留英文，合法
+        id: remote-docker
         run: |
           DOCKER_REPO="mlikiowa/napcat-docker"
           
-          # 获取最新标签
-          REMOTE_TAG=$(curl -sSL "https://hub.docker.com/v2/repositories/${DOCKER_REPO}/tags?page_size=1&ordering=last_updated" | jq -r '.results[0].name')
+          # 重试机制：最多3次获取Docker标签
+          for i in {1..3}; do
+            REMOTE_TAG=$(curl -sSL "https://hub.docker.com/v2/repositories/${DOCKER_REPO}/tags?page_size=1&ordering=last_updated" | jq -r '.results[0].name')
+            if [ "${REMOTE_TAG}" != "null" ] && [ -n "${REMOTE_TAG}" ]; then
+              break
+            fi
+            echo "⚠️ 第${i}次获取Docker标签失败，重试中..."
+            sleep 2
+          done
+          
+          # 最终校验标签
           if [ "${REMOTE_TAG}" = "null" ] || [ -z "${REMOTE_TAG}" ]; then
-            echo "❌ 无法获取Docker镜像最新标签"
+            echo "❌ 多次重试后仍无法获取Docker镜像最新标签"
             exit 1
           fi
           
-          # 获取镜像哈希
-          REMOTE_DIGEST=$(skopeo inspect docker://${DOCKER_REPO}:${REMOTE_TAG} | jq -r '.Digest')
+          # 获取镜像哈希（带重试）
+          for i in {1..3}; do
+            REMOTE_DIGEST=$(skopeo inspect docker://${DOCKER_REPO}:${REMOTE_TAG} | jq -r '.Digest')
+            if [ "${REMOTE_DIGEST}" != "null" ] && [ -n "${REMOTE_DIGEST}" ]; then
+              break
+            fi
+            echo "⚠️ 第${i}次获取Docker哈希失败，重试中..."
+            sleep 2
+          done
+          
           if [ "${REMOTE_DIGEST}" = "null" ] || [ -z "${REMOTE_DIGEST}" ]; then
-            echo "❌ 无法获取Docker镜像哈希"
+            echo "❌ 多次重试后仍无法获取Docker镜像哈希"
             exit 1
           fi
           
@@ -87,9 +134,9 @@ jobs:
           echo "REMOTE_DIGEST=${REMOTE_DIGEST}" >> $GITHUB_OUTPUT
           echo "✅ 远程镜像 - 版本: ${REMOTE_TAG}, 哈希: ${REMOTE_DIGEST}"
 
-      # 步骤5：对比版本/哈希，判断是否更新
+      # 步骤6：对比版本/哈希，判断是否更新
       - name: 对比版本和哈希（判断是否更新）
-        id: check-update  # 步骤ID保留英文，合法
+        id: check-update
         run: |
           if [ "${{ steps.local-config.outputs.LOCAL_VERSION }}" != "${{ steps.remote-docker.outputs.REMOTE_TAG }}" ] || [ "${{ steps.local-config.outputs.LOCAL_DIGEST }}" != "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" ]; then
             echo "NEED_UPDATE=true" >> $GITHUB_OUTPUT
@@ -99,48 +146,49 @@ jobs:
             echo "✅ 版本/哈希一致，无需更新"
           fi
 
-      # 步骤6：先更新manifest和哈希记录（打包前更新）
+      # 步骤7：打包前更新配置文件（manifest+哈希）
       - name: 打包前更新配置文件（manifest+哈希）
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         run: |
-          # 更新纯文本manifest（打包前先改版本号）
-          sed -i "s|^version=.*|version=${{ steps.remote-docker.outputs.REMOTE_TAG }}|g" ./manifest
+          # 更新manifest的version字段（非根目录）
+          sed -i "s|^version=.*|version=${{ steps.remote-docker.outputs.REMOTE_TAG }}|g" "${{ env.MANIFEST_PATH }}"
           # 更新哈希记录
-          echo "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" > ./docker-image-digest.txt
-          echo "✅ 已更新manifest和哈希记录，当前版本: ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
+          echo "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" > "${{ env.DIGEST_PATH }}"
+          echo "✅ 已更新配置文件："
+          echo "  - manifest路径: ${{ env.MANIFEST_PATH }}"
+          echo "  - 新版本号: ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
 
-      # 步骤7：进入fpk-napcatqq文件夹执行fnpack build打包
+      # 步骤8：执行fnpack build打包FPK
       - name: 执行fnpack build打包FPK
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         run: |
-          # 定义最终FPK文件名（符合规则：fpk-napcatqq-版本号-linux-amd64.fpk）
+          # 定义最终FPK文件名（符合Release规则）
           FPK_FILENAME="fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk"
           
-          # 检查fpk-napcatqq文件夹是否存在
-          if [ ! -d "./fpk-napcatqq" ]; then
-            echo "❌ 未找到fpk-napcatqq文件夹"
+          # 检查FPK打包文件夹是否存在
+          if [ ! -d "${{ env.FPK_FOLDER }}" ]; then
+            echo "❌ 未找到FPK打包文件夹（路径：${{ env.FPK_FOLDER }}）"
             exit 1
           fi
           
-          # 进入fpk-napcatqq文件夹执行fnpack build
-          cd ./fpk-napcatqq
-          # 执行打包（不依赖--version输出，直接执行）
+          # 进入文件夹执行打包
+          cd "${{ env.FPK_FOLDER }}"
+          echo "📝 执行打包命令：fnpack build"
           fnpack build
           
-          # 验证打包结果并按规则重命名
-          # 先查找打包生成的FPK文件（适配任意.fpk后缀）
+          # 查找打包生成的FPK文件
           FPK_FILE=$(ls *.fpk 2>/dev/null | head -n1)
           if [ -n "${FPK_FILE}" ]; then
-            # 重命名为目标文件名并复制到根目录
+            # 复制并重命名到根目录（便于后续推送/发布）
             mv ./${FPK_FILE} ../${FPK_FILENAME}
-            echo "✅ FPK打包成功，文件命名为: ${FPK_FILENAME}"
+            echo "✅ FPK打包成功，文件路径：../${FPK_FILENAME}"
           else
             echo "❌ 未找到fnpack build生成的FPK文件"
             ls -l  # 输出文件夹内容便于排查
             exit 1
           fi
 
-      # 步骤8：提交fpk-napcatqq仓库的配置变更（manifest+哈希）
+      # 步骤9：提交配置文件变更到仓库
       - name: 提交配置文件变更到仓库
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
@@ -149,29 +197,29 @@ jobs:
           commit_user_name: "GitHub Actions"
           commit_user_email: "actions@github.com"
           file_pattern: |
-            manifest
-            docker-image-digest.txt
+            ${{ env.MANIFEST_PATH }}
+            ${{ env.DIGEST_PATH }}
         env:
           VERSION: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
           DIGEST: ${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
 
-      # 步骤9：推送FPK到FnDepot仓库的fpk-napcatqq文件夹
+      # 步骤10：推送FPK到FnDepot仓库的fpk-napcatqq文件夹
       - name: 推送FPK文件到FnDepot仓库
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         env:
           PAT: ${{ secrets.FNDEPOT_PAT }}
         run: |
-          # 定义Release规则的文件名和FnDepot的目标文件名
+          # 定义文件名
           FPK_RELEASE_NAME="fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk"
           FPK_FNDEPOT_NAME="fpk-napcatqq.fpk"
           
           # 克隆FnDepot仓库
           git clone https://${PAT}@github.com/moxyis/FnDepot.git ./FnDepot
           
-          # 创建目标文件夹（若不存在）
+          # 创建目标文件夹
           mkdir -p ./FnDepot/fpk-napcatqq
           
-          # 复制并按FnDepot要求重命名
+          # 复制文件
           cp ./${FPK_RELEASE_NAME} ./FnDepot/fpk-napcatqq/${FPK_FNDEPOT_NAME}
           
           # 提交并推送
@@ -183,7 +231,7 @@ jobs:
           git push origin main
           echo "✅ FPK已推送到FnDepot/fpk-napcatqq/ (命名为: ${FPK_FNDEPOT_NAME})"
 
-      # 步骤10：发布到GitHub Release（适配命名/标题规则）
+      # 步骤11：发布到GitHub Release（适配命名/标题规则）
       - name: 发布FPK到GitHub Release
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         uses: softprops/action-gh-release@v2
@@ -194,7 +242,8 @@ jobs:
             ### 自动构建的FPK包
             - Docker镜像: ${{ steps.remote-docker.outputs.REMOTE_REPO }}@${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
             - Manifest版本: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
-            - 构建命令: fnpack build（在fpk-napcatqq文件夹执行）
+            - Manifest路径: ${{ env.MANIFEST_PATH }}
+            - 构建命令: fnpack build（路径：${{ env.FPK_FOLDER }}）
             - 平台架构: linux-amd64
             - FnDepot文件名: fpk-napcatqq.fpk
           files: ./fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk  # Release文件命名规则
