@@ -202,7 +202,7 @@ jobs:
         if: steps.compare.outputs.need_update == 'true'
         run: |
           set -euo pipefail
-          COMMIT_MSG="chore: 更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)"
+          COMMIT_MSG="chore: 更新fpk-napcatqq版本至${{ steps.remote_ver.outputs.remote_version }} "
           
           # 提交（无变更时不报错）
           git commit -m "$COMMIT_MSG" || echo "✅ 无需要提交的变更"
