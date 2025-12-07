@@ -14,7 +14,7 @@ permissions:
   actions: read
 
 jobs:
-  检测并构建FPK:
+  check-and-build-fpk:  # 修复：job ID改为合法英文（仅字母/下划线/短横线）
     runs-on: ubuntu-latest
     steps:
       # 步骤1：拉取fpk-napcatqq仓库代码
@@ -46,7 +46,7 @@ jobs:
 
       # 步骤3：读取本地纯文本manifest和哈希记录
       - name: 读取本地配置（版本+哈希）
-        id: local-config
+        id: local-config  # 步骤ID保留英文，合法
         run: |
           # 读取纯文本manifest的version
           LOCAL_VERSION=$(grep -E '^version=' ./manifest | cut -d'=' -f2)
@@ -64,7 +64,7 @@ jobs:
 
       # 步骤4：远程获取Docker镜像最新版本+哈希
       - name: 获取远程Docker镜像信息
-        id: remote-docker
+        id: remote-docker  # 步骤ID保留英文，合法
         run: |
           DOCKER_REPO="mlikiowa/napcat-docker"
           
@@ -89,7 +89,7 @@ jobs:
 
       # 步骤5：对比版本/哈希，判断是否更新
       - name: 对比版本和哈希（判断是否更新）
-        id: check-update
+        id: check-update  # 步骤ID保留英文，合法
         run: |
           if [ "${{ steps.local-config.outputs.LOCAL_VERSION }}" != "${{ steps.remote-docker.outputs.REMOTE_TAG }}" ] || [ "${{ steps.local-config.outputs.LOCAL_DIGEST }}" != "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" ]; then
             echo "NEED_UPDATE=true" >> $GITHUB_OUTPUT
