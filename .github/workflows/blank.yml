@@ -22,6 +22,7 @@ jobs:
       # =========================================================
       DIGEST_PATH: "./docker-image-digest.txt"  # 哈希记录文件路径（可按需修改）
       FPK_FOLDER: "./fpk-napcatqq"              # FPK打包文件夹路径
+      DOCKER_REPO: "mlikiowa/napcat-docker"     # Docker镜像仓库地址
 
     steps:
       # 步骤1：拉取fpk-napcatqq仓库代码
@@ -92,31 +93,39 @@ jobs:
           echo "LOCAL_DIGEST=${LOCAL_DIGEST}" >> $GITHUB_OUTPUT
           echo "✅ 本地记录 - 版本: ${LOCAL_VERSION}, 哈希: ${LOCAL_DIGEST}"
 
-      # 步骤5：远程获取Docker镜像最新版本+哈希（带重试）
+      # 步骤5：远程获取Docker镜像最新版本+哈希（过滤latest，带重试）
       - name: 获取远程Docker镜像信息
         id: remote-docker
         run: |
-          DOCKER_REPO="mlikiowa/napcat-docker"
-          
-          # 重试机制：最多3次获取Docker标签
+          # 重试机制：最多3次获取Docker标签（过滤latest，优先版本号）
           for i in {1..3}; do
-            REMOTE_TAG=$(curl -sSL "https://hub.docker.com/v2/repositories/${DOCKER_REPO}/tags?page_size=1&ordering=last_updated" | jq -r '.results[0].name')
-            if [ "${REMOTE_TAG}" != "null" ] && [ -n "${REMOTE_TAG}" ]; then
+            # 获取前10个标签，过滤掉latest，按更新时间排序取第一个版本号
+            REMOTE_TAG=$(curl -sSL "https://hub.docker.com/v2/repositories/${{ env.DOCKER_REPO }}/tags?page_size=10&ordering=last_updated" \
+              | jq -r '.results[].name' \
+              | grep -v -E '^latest$|^dev$|^beta$' \  # 过滤latest、dev、beta等非版本号标签
+              | grep -E '^[0-9]+\.[0-9]+' \          # 只匹配x.y格式的版本号（可按需调整正则）
+              | head -n1)
+            
+            if [ -n "${REMOTE_TAG}" ] && [ "${REMOTE_TAG}" != "null" ]; then
               break
             fi
-            echo "⚠️ 第${i}次获取Docker标签失败，重试中..."
+            echo "⚠️ 第${i}次获取Docker版本号标签失败，重试中..."
             sleep 2
           done
           
-          # 最终校验标签
-          if [ "${REMOTE_TAG}" = "null" ] || [ -z "${REMOTE_TAG}" ]; then
-            echo "❌ 多次重试后仍无法获取Docker镜像最新标签"
-            exit 1
+          # 最终校验标签（若仍无版本号，使用latest但给出警告）
+          if [ -z "${REMOTE_TAG}" ] || [ "${REMOTE_TAG}" = "null" ]; then
+            echo "⚠️ 未找到有效版本号标签，降级使用latest"
+            REMOTE_TAG=$(curl -sSL "https://hub.docker.com/v2/repositories/${{ env.DOCKER_REPO }}/tags?page_size=1&ordering=last_updated" | jq -r '.results[0].name')
+            if [ "${REMOTE_TAG}" = "null" ] || [ -z "${REMOTE_TAG}" ]; then
+              echo "❌ 多次重试后仍无法获取Docker镜像标签"
+              exit 1
+            fi
           fi
           
           # 获取镜像哈希（带重试）
           for i in {1..3}; do
-            REMOTE_DIGEST=$(skopeo inspect docker://${DOCKER_REPO}:${REMOTE_TAG} | jq -r '.Digest')
+            REMOTE_DIGEST=$(skopeo inspect docker://${{ env.DOCKER_REPO }}:${REMOTE_TAG} | jq -r '.Digest')
             if [ "${REMOTE_DIGEST}" != "null" ] && [ -n "${REMOTE_DIGEST}" ]; then
               break
             fi
@@ -129,7 +138,7 @@ jobs:
             exit 1
           fi
           
-          echo "REMOTE_REPO=${DOCKER_REPO}" >> $GITHUB_OUTPUT
+          echo "REMOTE_REPO=${{ env.DOCKER_REPO }}" >> $GITHUB_OUTPUT
           echo "REMOTE_TAG=${REMOTE_TAG}" >> $GITHUB_OUTPUT
           echo "REMOTE_DIGEST=${REMOTE_DIGEST}" >> $GITHUB_OUTPUT
           echo "✅ 远程镜像 - 版本: ${REMOTE_TAG}, 哈希: ${REMOTE_DIGEST}"
@@ -203,18 +212,28 @@ jobs:
           VERSION: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
           DIGEST: ${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
 
-      # 步骤10：推送FPK到FnDepot仓库的fpk-napcatqq文件夹
+      # 步骤10：推送FPK到FnDepot仓库（修复PAT认证）
       - name: 推送FPK文件到FnDepot仓库
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         env:
           PAT: ${{ secrets.FNDEPOT_PAT }}
+          GITHUB_USER: moxyis  # 替换为你的GitHub用户名
         run: |
           # 定义文件名
           FPK_RELEASE_NAME="fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk"
           FPK_FNDEPOT_NAME="fpk-napcatqq.fpk"
           
-          # 克隆FnDepot仓库
-          git clone https://${PAT}@github.com/moxyis/FnDepot.git ./FnDepot
+          # 清理旧目录避免缓存问题
+          rm -rf ./FnDepot
+          
+          # 克隆FnDepot仓库（使用用户名+PAT认证，避免密码读取失败）
+          git clone https://${GITHUB_USER}:${PAT}@github.com/${GITHUB_USER}/FnDepot.git ./FnDepot
+          
+          # 检查克隆是否成功
+          if [ ! -d "./FnDepot/.git" ]; then
+            echo "❌ FnDepot仓库克隆失败"
+            exit 1
+          fi
           
           # 创建目标文件夹
           mkdir -p ./FnDepot/fpk-napcatqq
@@ -222,13 +241,16 @@ jobs:
           # 复制文件
           cp ./${FPK_RELEASE_NAME} ./FnDepot/fpk-napcatqq/${FPK_FNDEPOT_NAME}
           
-          # 提交并推送
+          # 提交并推送（禁用交互式认证）
           cd ./FnDepot
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          git config --global credential.helper store  # 禁用交互式认证
+          
           git add ./fpk-napcatqq/${FPK_FNDEPOT_NAME}
           git commit -m "更新fpk-napcatqq.fpk到版本 ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
-          git push origin main
+          git push origin main --force-with-lease  # 安全强制推送
+          
           echo "✅ FPK已推送到FnDepot/fpk-napcatqq/ (命名为: ${FPK_FNDEPOT_NAME})"
 
       # 步骤11：发布到GitHub Release（适配命名/标题规则）
