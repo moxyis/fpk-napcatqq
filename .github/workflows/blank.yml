@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '0 0 * * *'  # 每日UTC 0点（北京时间8点）执行
 
-jobs:
+jobs
   build:
     runs-on: ubuntu-latest
     permissions:
@@ -16,7 +16,7 @@ jobs:
       run:
         shell: bash
         working-directory: .
-    steps:
+    steps
       # ===================== 第一步：环境准备 =====================
       - name: 1. 检出当前仓库代码（带完整历史）
         uses: actions/checkout@v4
@@ -46,13 +46,15 @@ jobs:
           echo "✅ Git身份配置完成"
 
       # ===================== 第二步：版本比对（核心前置） =====================
-      - name: 4. 读取本地manifest版本号（鲁棒版）
+      - name: 4. 读取本地manifest版本号（鲁棒版，修复换行符问题）
         id: local_ver
         run: |
           if [ -f "fpk-napcatqq/manifest" ]; then
+            # 核心修复：通过tr -d '\n'强制移除换行符，xargs去空格，确保无隐藏字符
             LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' fpk-napcatqq/manifest \
-              | tr -d '"' | tr -d "'" | sed 's/^v//' | xargs)  # 严格去空格和特殊字符
-            echo "本地manifest版本：$LOCAL_VERSION"
+              | tr -d '"' | tr -d "'" | sed 's/^v//' \
+              | tr -d '\n' | xargs)  # 先删换行符，再去空格
+            echo "本地manifest版本：[$LOCAL_VERSION]"  # 带[]输出，直观检查隐藏字符
             echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
           else
             echo "❌ 未找到fpk-napcatqq/manifest，强制触发更新"
@@ -102,22 +104,24 @@ jobs:
           LATEST_TAG=$(echo "$SORTED_TAGS" | tail -n1 | cut -d'|' -f2)
           REMOTE_VERSION="${LATEST_TAG#v}"
           
-          # 提取镜像哈希（严格去空格）
+          # 提取镜像哈希（严格去空格和换行符）
           REMOTE_DIGEST=$(echo "$RAW_RESPONSE" | jq -r --arg tag "$LATEST_TAG" \
-            '.results[] | select(.name == $tag) | .images[0].digest // ""' | xargs)
+            '.results[] | select(.name == $tag) | .images[0].digest // ""' \
+            | tr -d '\n' | xargs)  # 同样处理哈希值，避免隐藏字符
           
           # 哈希兜底（API获取失败时）
           if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ]; then
             REMOTE_DIGEST=$(skopeo inspect --format '{{.Digest}}' \
-              docker://mlikiowa/napcat-docker:${LATEST_TAG} 2>/dev/null | xargs || echo "")
+              docker://mlikiowa/napcat-docker:${LATEST_TAG} 2>/dev/null \
+              | tr -d '\n' | xargs || echo "")
           fi
           
-          echo "✅ 最新版本：$REMOTE_VERSION，哈希：${REMOTE_DIGEST:0:12}..."
+          echo "✅ 最新版本：[$REMOTE_VERSION]，哈希：[${REMOTE_DIGEST:0:12}...]"
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
           echo "remote_digest=$REMOTE_DIGEST" >> $GITHUB_OUTPUT
           echo "total_tags=$TOTAL_TAGS" >> $GITHUB_OUTPUT
 
-      - name: 6. 读取本地哈希记录
+      - name: 6. 读取本地哈希记录（修复隐藏字符）
         id: local_digest
         run: |
           set -euo pipefail
@@ -126,12 +130,12 @@ jobs:
           # 初始化哈希文件（确保存在）
           [ ! -f "$DIGEST_FILE" ] && touch "$DIGEST_FILE"
           
-          # 读取哈希（严格去空格，避免隐藏字符干扰）
-          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | xargs || echo "")
+          # 读取哈希（严格去空格和换行符）
+          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\n' | xargs || echo "")
+          echo "本地哈希：[${LOCAL_DIGEST:0:12}...]"
           echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
-          echo "✅ 本地哈希：${LOCAL_DIGEST:0:12}..."
 
-      - name: 7. 版本+哈希比对（修复逻辑）
+      - name: 7. 版本+哈希比对（精确判断）
         id: compare
         run: |
           set -euo pipefail
@@ -140,14 +144,14 @@ jobs:
           LOCAL_DIG="${{ steps.local_digest.outputs.local_digest }}"
           REMOTE_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
           
-          # 打印原始值（带边界符，排查隐藏字符）
-          echo -e "\n🔍 原始值比对："
+          # 打印原始值（带[]边界符，强制显式隐藏字符）
+          echo -e "\n🔍 原始值比对（带边界符）："
           echo "LOCAL_VER: [$LOCAL_VER]"
           echo "REMOTE_VER: [$REMOTE_VER]"
           echo "LOCAL_DIG: [$LOCAL_DIG]"
           echo "REMOTE_DIG: [$REMOTE_DIG]"
           
-          # 核心修复：仅当版本不同 或 版本相同但哈希不同（且均非空）时更新
+          # 精确判断逻辑：仅当版本不同 或 版本相同但哈希不同（且均非空）时更新
           if [ "$LOCAL_VER" != "$REMOTE_VER" ] || { [ "$LOCAL_VER" = "$REMOTE_VER" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ] && [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ]; }; then
             echo "✅ 需要更新（版本或哈希不一致）"
             echo "need_update=true" >> $GITHUB_OUTPUT
@@ -166,16 +170,16 @@ jobs:
           NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
           NEW_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
           
-          # 更新版本号
+          # 更新版本号（确保写入时无多余换行）
           sed -i -E "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${NEW_VER}\3/" "$MANIFEST_PATH"
           
-          # 更新哈希
-          echo "$NEW_DIG" > "$DIGEST_FILE"
+          # 更新哈希（echo -n 避免自动添加换行符）
+          echo -n "$NEW_DIG" > "$DIGEST_FILE"
           
-          # 验证更新
-          echo -e "\n✅ 更新结果："
-          echo "manifest版本: $(grep -i version "$MANIFEST_PATH")"
-          echo "哈希记录: $(cat "$DIGEST_FILE")"
+          # 验证更新（带边界符检查）
+          echo -e "\n✅ 更新结果验证："
+          echo "manifest版本: [$(grep -i version "$MANIFEST_PATH" | sed 's/.*=//' | tr -d ' "' | xargs)]"
+          echo "哈希记录: [$(cat "$DIGEST_FILE")]"
           git add "$MANIFEST_PATH" "$DIGEST_FILE"
 
       - name: 9. 提交并推送变更
