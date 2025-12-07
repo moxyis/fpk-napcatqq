@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '0 0 * * *'  # 每日UTC 0点（北京时间8点）执行
 
-jobs
+jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
@@ -16,7 +16,7 @@ jobs
       run:
         shell: bash
         working-directory: .
-    steps
+    steps:
       # ===================== 第一步：环境准备 =====================
       - name: 1. 检出当前仓库代码（带完整历史）
         uses: actions/checkout@v4
@@ -50,11 +50,11 @@ jobs
         id: local_ver
         run: |
           if [ -f "fpk-napcatqq/manifest" ]; then
-            # 核心修复：通过tr -d '\n'强制移除换行符，xargs去空格，确保无隐藏字符
+            # 强制移除换行符和空格，确保无隐藏字符
             LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' fpk-napcatqq/manifest \
               | tr -d '"' | tr -d "'" | sed 's/^v//' \
-              | tr -d '\n' | xargs)  # 先删换行符，再去空格
-            echo "本地manifest版本：[$LOCAL_VERSION]"  # 带[]输出，直观检查隐藏字符
+              | tr -d '\n' | xargs)
+            echo "本地manifest版本：[$LOCAL_VERSION]"  # 带边界符检查
             echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
           else
             echo "❌ 未找到fpk-napcatqq/manifest，强制触发更新"
@@ -93,23 +93,23 @@ jobs
             exit 1
           fi
           
-          # 版本号数字排序（补全X.Y为X.Y.0，按数字逻辑排序）
+          # 版本号数字排序（补全X.Y为X.Y.0）
           SORTED_TAGS=$(echo "$ALL_VALID_TAGS" | while read -r tag; do
             ver=${tag#v}
-            [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]] && ver="$ver.0"  # 补全为三位版本号
-            echo "$ver|$tag"  # 格式：版本号|标签名
-          done | sort -t. -k1,1n -k2,2n -k3,3n)  # 按数字排序
+            [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]] && ver="$ver.0"
+            echo "$ver|$tag"
+          done | sort -t. -k1,1n -k2,2n -k3,3n)
           
           # 取最新版本标签
           LATEST_TAG=$(echo "$SORTED_TAGS" | tail -n1 | cut -d'|' -f2)
           REMOTE_VERSION="${LATEST_TAG#v}"
           
-          # 提取镜像哈希（严格去空格和换行符）
+          # 提取镜像哈希（处理隐藏字符）
           REMOTE_DIGEST=$(echo "$RAW_RESPONSE" | jq -r --arg tag "$LATEST_TAG" \
             '.results[] | select(.name == $tag) | .images[0].digest // ""' \
-            | tr -d '\n' | xargs)  # 同样处理哈希值，避免隐藏字符
+            | tr -d '\n' | xargs)
           
-          # 哈希兜底（API获取失败时）
+          # 哈希兜底
           if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ]; then
             REMOTE_DIGEST=$(skopeo inspect --format '{{.Digest}}' \
               docker://mlikiowa/napcat-docker:${LATEST_TAG} 2>/dev/null \
@@ -127,10 +127,7 @@ jobs
           set -euo pipefail
           DIGEST_FILE="docker-image-digest.txt"
           
-          # 初始化哈希文件（确保存在）
           [ ! -f "$DIGEST_FILE" ] && touch "$DIGEST_FILE"
-          
-          # 读取哈希（严格去空格和换行符）
           LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\n' | xargs || echo "")
           echo "本地哈希：[${LOCAL_DIGEST:0:12}...]"
           echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
@@ -144,14 +141,13 @@ jobs
           LOCAL_DIG="${{ steps.local_digest.outputs.local_digest }}"
           REMOTE_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
           
-          # 打印原始值（带[]边界符，强制显式隐藏字符）
           echo -e "\n🔍 原始值比对（带边界符）："
           echo "LOCAL_VER: [$LOCAL_VER]"
           echo "REMOTE_VER: [$REMOTE_VER]"
           echo "LOCAL_DIG: [$LOCAL_DIG]"
           echo "REMOTE_DIG: [$REMOTE_DIG]"
           
-          # 精确判断逻辑：仅当版本不同 或 版本相同但哈希不同（且均非空）时更新
+          # 精确判断逻辑
           if [ "$LOCAL_VER" != "$REMOTE_VER" ] || { [ "$LOCAL_VER" = "$REMOTE_VER" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ] && [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ]; }; then
             echo "✅ 需要更新（版本或哈希不一致）"
             echo "need_update=true" >> $GITHUB_OUTPUT
@@ -170,13 +166,13 @@ jobs
           NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
           NEW_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
           
-          # 更新版本号（确保写入时无多余换行）
+          # 更新版本号（避免多余换行）
           sed -i -E "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${NEW_VER}\3/" "$MANIFEST_PATH"
           
-          # 更新哈希（echo -n 避免自动添加换行符）
+          # 更新哈希（echo -n 避免换行）
           echo -n "$NEW_DIG" > "$DIGEST_FILE"
           
-          # 验证更新（带边界符检查）
+          # 验证更新
           echo -e "\n✅ 更新结果验证："
           echo "manifest版本: [$(grep -i version "$MANIFEST_PATH" | sed 's/.*=//' | tr -d ' "' | xargs)]"
           echo "哈希记录: [$(cat "$DIGEST_FILE")]"
@@ -210,11 +206,9 @@ jobs
           cd fpk-napcatqq
           fnpack build
           
-          # 查找打包产物
           FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
           [ -z "$FPK_FILE" ] && { echo "❌ 未生成fpk文件"; exit 1; }
           
-          # 重命名并复制到临时目录
           VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           ARCH="Linux-AMD64"
           FPK_VERSION_NAME="fpk-napcatqq-v${VERSION}-${ARCH}.fpk"
@@ -248,11 +242,9 @@ jobs
           JSON_FILE="/tmp/FnDepot/fnpack.json"
           README_FILE="/tmp/FnDepot/README.md"
           
-          # 更新fnpack.json
           jq --arg ver "$VERSION" '.["fpk-napcatqq"].version = $ver' "$JSON_FILE" > "$JSON_FILE.tmp"
           mv "$JSON_FILE.tmp" "$JSON_FILE"
           
-          # 更新README.md
           sed -i -E "s/(NapCatQQ\s*\|\s*)[0-9.]+/\1$VERSION/" "$README_FILE"
           
           git -C /tmp/FnDepot add .
