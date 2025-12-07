@@ -1,0 +1,199 @@
+name: 版本比对后自动打包fpk-napcatqq并更新仓库
+
+# 触发规则：每日UTC 0点（北京时间8点）执行 + 手动触发
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+# 权限配置（允许提交代码、操作Release、拉取/推送其他仓库）
+permissions:
+  contents: write
+  packages: read
+  id-token: write
+  actions: read
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤1：拉取fpk-napcatqq仓库代码
+      - name: Checkout fpk-napcatqq Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # 步骤2：安装依赖 + 下载 fnpack 打包工具
+      - name: Install Dependencies & Fnpack
+        run: |
+          # 安装基础依赖
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq git
+          
+          # 下载并安装fnpack
+          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
+          wget -O /usr/local/bin/fnpack ${FNPACK_URL}
+          chmod +x /usr/local/bin/fnpack
+          
+          # 验证fnpack
+          if fnpack --version 2>/dev/null; then
+            echo "✅ fnpack 安装成功"
+          else
+            echo "❌ fnpack 安装失败"
+            exit 1
+          fi
+
+      # 步骤3：读取本地纯文本manifest和哈希记录
+      - name: Read Local Config
+        id: local-config
+        run: |
+          # 读取纯文本manifest的version
+          LOCAL_VERSION=$(grep -E '^version=' ./manifest | cut -d'=' -f2)
+          if [ -z "${LOCAL_VERSION}" ]; then
+            echo "❌ 未从manifest读取到version字段"
+            exit 1
+          fi
+          
+          # 读取哈希记录
+          LOCAL_DIGEST=$(cat ./docker-image-digest.txt 2>/dev/null || echo "")
+          
+          echo "LOCAL_VERSION=${LOCAL_VERSION}" >> $GITHUB_OUTPUT
+          echo "LOCAL_DIGEST=${LOCAL_DIGEST}" >> $GITHUB_OUTPUT
+          echo "✅ 本地记录 - 版本: ${LOCAL_VERSION}, 哈希: ${LOCAL_DIGEST}"
+
+      # 步骤4：远程获取Docker镜像最新版本+哈希
+      - name: Get Remote Docker Info
+        id: remote-docker
+        run: |
+          DOCKER_REPO="mlikiowa/napcat-docker"
+          
+          # 获取最新标签
+          REMOTE_TAG=$(curl -sSL "https://hub.docker.com/v2/repositories/${DOCKER_REPO}/tags?page_size=1&ordering=last_updated" | jq -r '.results[0].name')
+          if [ "${REMOTE_TAG}" = "null" ] || [ -z "${REMOTE_TAG}" ]; then
+            echo "❌ 无法获取Docker镜像最新标签"
+            exit 1
+          fi
+          
+          # 获取镜像哈希
+          REMOTE_DIGEST=$(skopeo inspect docker://${DOCKER_REPO}:${REMOTE_TAG} | jq -r '.Digest')
+          if [ "${REMOTE_DIGEST}" = "null" ] || [ -z "${REMOTE_DIGEST}" ]; then
+            echo "❌ 无法获取Docker镜像哈希"
+            exit 1
+          fi
+          
+          echo "REMOTE_REPO=${DOCKER_REPO}" >> $GITHUB_OUTPUT
+          echo "REMOTE_TAG=${REMOTE_TAG}" >> $GITHUB_OUTPUT
+          echo "REMOTE_DIGEST=${REMOTE_DIGEST}" >> $GITHUB_OUTPUT
+          echo "✅ 远程镜像 - 版本: ${REMOTE_TAG}, 哈希: ${REMOTE_DIGEST}"
+
+      # 步骤5：对比版本/哈希，判断是否更新
+      - name: Check Update Need
+        id: check-update
+        run: |
+          if [ "${{ steps.local-config.outputs.LOCAL_VERSION }}" != "${{ steps.remote-docker.outputs.REMOTE_TAG }}" ] || [ "${{ steps.local-config.outputs.LOCAL_DIGEST }}" != "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" ]; then
+            echo "NEED_UPDATE=true" >> $GITHUB_OUTPUT
+            echo "🔔 版本/哈希不一致，触发更新"
+          else
+            echo "NEED_UPDATE=false" >> $GITHUB_OUTPUT
+            echo "✅ 版本/哈希一致，无需更新"
+          fi
+
+      # 步骤6：先更新manifest和哈希记录（打包前更新）
+      - name: Update Config Files Before Build
+        if: steps.check-update.outputs.NEED_UPDATE == 'true'
+        run: |
+          # 更新纯文本manifest（打包前先改版本号）
+          sed -i "s|^version=.*|version=${{ steps.remote-docker.outputs.REMOTE_TAG }}|g" ./manifest
+          # 更新哈希记录
+          echo "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" > ./docker-image-digest.txt
+          echo "✅ 已更新manifest和哈希记录，当前版本: ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
+
+      # 步骤7：进入fpk-napcatqq文件夹执行fnpack build打包
+      - name: Rebuild FPK with fnpack build
+        if: steps.check-update.outputs.NEED_UPDATE == 'true'
+        run: |
+          # 定义最终FPK文件名（符合规则：fpk-napcatqq-版本号-linux-amd64.fpk）
+          FPK_FILENAME="fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk"
+          
+          # 检查fpk-napcatqq文件夹是否存在
+          if [ ! -d "./fpk-napcatqq" ]; then
+            echo "❌ 未找到fpk-napcatqq文件夹"
+            exit 1
+          fi
+          
+          # 进入fpk-napcatqq文件夹执行fnpack build
+          cd ./fpk-napcatqq
+          fnpack build
+          
+          # 验证打包结果并按规则重命名
+          # 先查找打包生成的FPK文件（适配任意.fpk后缀）
+          FPK_FILE=$(ls *.fpk 2>/dev/null | head -n1)
+          if [ -n "${FPK_FILE}" ]; then
+            # 重命名为目标文件名并复制到根目录
+            mv ./${FPK_FILE} ../${FPK_FILENAME}
+            echo "✅ FPK打包成功，文件命名为: ${FPK_FILENAME}"
+          else
+            echo "❌ 未找到fnpack build生成的FPK文件"
+            exit 1
+          fi
+
+      # 步骤8：提交fpk-napcatqq仓库的配置变更（manifest+哈希）
+      - name: Commit Config Changes to fpk-napcatqq
+        if: steps.check-update.outputs.NEED_UPDATE == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update to napcat-docker ${VERSION} (digest: ${DIGEST})"
+          commit_user_name: "GitHub Actions"
+          commit_user_email: "actions@github.com"
+          file_pattern: |
+            manifest
+            docker-image-digest.txt
+        env:
+          VERSION: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
+          DIGEST: ${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
+
+      # 步骤9：推送FPK到FnDepot仓库的fpk-napcatqq文件夹（统一命名为fpk-napcatqq.fpk）
+      - name: Push FPK to FnDepot Repository
+        if: steps.check-update.outputs.NEED_UPDATE == 'true'
+        env:
+          PAT: ${{ secrets.FNDEPOT_PAT }}
+        run: |
+          # 定义Release规则的文件名和FnDepot的目标文件名
+          FPK_RELEASE_NAME="fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk"
+          FPK_FNDEPOT_NAME="fpk-napcatqq.fpk"
+          
+          # 克隆FnDepot仓库
+          git clone https://${PAT}@github.com/moxyis/FnDepot.git ./FnDepot
+          
+          # 创建目标文件夹（若不存在）
+          mkdir -p ./FnDepot/fpk-napcatqq
+          
+          # 复制并按FnDepot要求重命名
+          cp ./${FPK_RELEASE_NAME} ./FnDepot/fpk-napcatqq/${FPK_FNDEPOT_NAME}
+          
+          # 提交并推送
+          cd ./FnDepot
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add ./fpk-napcatqq/${FPK_FNDEPOT_NAME}
+          git commit -m "update fpk-napcatqq.fpk to version ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
+          git push origin main
+          echo "✅ FPK已推送到FnDepot/fpk-napcatqq/ (命名为: ${FPK_FNDEPOT_NAME})"
+
+      # 步骤10：发布到fpk-napcatqq仓库的GitHub Release（适配命名/标题规则）
+      - name: Create GitHub Release
+        if: steps.check-update.outputs.NEED_UPDATE == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.remote-docker.outputs.REMOTE_TAG }}
+          name: "fpk-napcatqq ${{ steps.remote-docker.outputs.REMOTE_TAG }}"  # Release标题规则
+          body: |
+            ### Auto-built FPK Package
+            - Docker Image: ${{ steps.remote-docker.outputs.REMOTE_REPO }}@${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
+            - Manifest Version: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
+            - Build Command: fnpack build (in fpk-napcatqq folder)
+            - Platform: linux-amd64
+            - FPK File (FnDepot): fpk-napcatqq.fpk
+          files: ./fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk  # Release文件命名规则
+          draft: false
+          prerelease: false
