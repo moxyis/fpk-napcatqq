@@ -327,34 +327,33 @@ jobs:
           echo "✅ fnpack.json更新后内容："
           cat "$JSON_FILE"
 
-      - name: 15. 更新FnDepot的README.md（修复EOF+新格式）
+      - name: 15. 更新FnDepot的README.md（修复匹配规则）
         if: steps.compare.outputs.need_update == 'true'
         run: |
           set -euo pipefail
           README_FILE="/tmp/FnDepot/README.md"
           NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
-          TARGET_LINK="NapNeko/https://github.com/NapNeko/NapCatQQ/"
-          
-          # 初始化README（改用逐行echo避免EOF解析错误）
+    
+          # 初始化README（兼容现有格式）
           if [ ! -f "$README_FILE" ]; then
-            echo "# FnDepot" > "$README_FILE"
-            echo "" >> "$README_FILE"
-            echo "| **NapCatQQ** | $NEW_VER | $TARGET_LINK |" >> "$README_FILE"
-            echo "" >> "$README_FILE"
-            echo "NapCatQQ是通过Github-Actions进行每天自动化检测最新NapCatQQ版本进行打包推送到本仓库，上方的应用清单的NapCatQQ对应版本号暂时不会自动更新" >> "$README_FILE"
-            echo "脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq" >> "$README_FILE"
-            echo "✅ 创建默认README.md（新格式）"
-          else
-            # 关键修复：改用#作为sed分隔符，避免/冲突；适配新链接格式
-            sed -i -E \
-              "s#(\|\s*\*\*?NapCatQQ\*\*?\s*\|\s*)[0-9.]+\s*(\|\s*${TARGET_LINK}\s*\|)#\1${NEW_VER}\2#g" \
-              "$README_FILE"
-            echo "✅ README.md版本号已更新为：$NEW_VER"
-          fi
-          
-          # 输出关键内容验证
-          echo "📄 更新后的README.md关键内容："
-          grep -A 2 -B 1 "NapCatQQ" "$README_FILE"
+          echo "# FnDepot" > "$README_FILE"
+          echo "" >> "$README_FILE"
+          echo "| **NapCatQQ**            | $NEW_VER | NapNeko/https://github.com/NapNeko/NapCatQQ          |Docker|" >> "$README_FILE"
+          echo "" >> "$README_FILE"
+          echo "NapCatQQ是通过Github-Actions进行每天自动化检测最新NapCatQQ版本进行打包推送到本仓库，上方的应用清单的NapCatQQ对应版本号暂时不会自动更新" >> "$README_FILE"
+          echo "脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq" >> "$README_FILE"
+          echo "✅ 创建默认README.md（兼容现有格式）"
+           else
+           # 修复后的sed规则：兼容任意空格、行尾Docker后缀、链接格式
+          sed -i -E \
+        's/(\|\s*\*\*?NapCatQQ\*\*?\s*\|\s*)[0-9.]+\s*(\|.*NapNeko\/https:\/\/github\.com\/NapNeko\/NapCatQQ.*)/\1'"${NEW_VER}"'\2/' \
+        "$README_FILE"
+      echo "✅ README.md版本号已更新为：$NEW_VER"
+    fi
+    
+    # 输出关键内容验证
+    echo "📄 更新后的README.md关键内容："
+    grep -A 2 -B 1 "NapCatQQ" "$README_FILE"
 
       - name: 16. 提交并推送FnDepot变更
         if: steps.compare.outputs.need_update == 'true'
