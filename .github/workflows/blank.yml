@@ -93,8 +93,21 @@ jobs:
             exit 1
           fi
           
-          # 【核心修改】移除版本号数字排序，直接取最后一个标签作为最新版本
-          LATEST_TAG=$(echo "$ALL_VALID_TAGS" | tail -n1)
+          # 【核心修改】移除4.x筛选，直接使用所有有效标签
+          TARGET_TAGS="$ALL_VALID_TAGS"
+          
+          # 5. 版本号数字排序（解决4.17 vs 4.9.81问题）
+          SORTED_TAGS=$(echo "$TARGET_TAGS" | while read -r tag; do
+            ver=${tag#v}
+            if [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]]; then
+              echo "$ver.0|$tag"  # 补全为X.Y.Z格式
+            else
+              echo "$ver|$tag"
+            fi
+          done | sort -t. -k1,1n -k2,2n -k3,3n)
+          
+          # 6. 取排序后的最后一个标签（最新版本）
+          LATEST_TAG=$(echo "$SORTED_TAGS" | tail -n1 | cut -d'|' -f2)
           REMOTE_VERSION="${LATEST_TAG#v}"
           
           echo "✅ 筛选到最新版本标签：$LATEST_TAG → 版本号：$REMOTE_VERSION"
