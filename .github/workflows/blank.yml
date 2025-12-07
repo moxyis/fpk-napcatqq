@@ -307,7 +307,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ steps.remote_ver.outputs.remote_version }}-linux"
-          name: "napcat-docker v${{ steps.remote_ver.outputs.remote_version }}"
+          name: "fpk-napcatqq v${{ steps.remote_ver.outputs.remote_version }}"
           body: |
             ## 自动更新说明
             - 版本：v${{ steps.remote_ver.outputs.remote_version }}
