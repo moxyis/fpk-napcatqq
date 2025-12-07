@@ -77,7 +77,7 @@ jobs:
           echo "✅ 本地manifest版本：$LOCAL_VERSION"
           echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
 
-      - name: 5. 调用Docker Hub V2 API获取完整标签列表
+      - name: 5. 调用Docker Hub V2 API获取完整标签列表（修复版本排序）
         id: remote_ver
         run: |
           set -euo pipefail
@@ -126,7 +126,7 @@ jobs:
             echo "✅ 第${PAGE_COUNT}页获取到 $(echo "$PAGE_TAGS" | wc -l) 个有效标签"
           done
           
-          # ===================== 处理标签数据 =====================
+          # ===================== 处理标签数据（核心修复：版本排序） =====================
           # 去重
           UNIQUE_TAGS=($(printf "%s\n" "${ALL_TAGS[@]}" | sort -u))
           echo -e "\n📊 API统计："
@@ -134,17 +134,41 @@ jobs:
           echo "   去重后标签数：${#UNIQUE_TAGS[@]}"
           echo "   标签列表：${UNIQUE_TAGS[*]}"
           
-          # 筛选有效版本标签
+          # 筛选有效版本标签（vX.Y.Z 格式）
           VERSION_TAGS=($(printf "%s\n" "${UNIQUE_TAGS[@]}" \
             | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$|^test$' \
             | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-            | sed 's/^v//' \
-            | sort -V))
+            | sed 's/^v//'))
           
-          # 更新最新版本
-          if [ ${#VERSION_TAGS[@]} -gt 0 ]; then
-            REMOTE_VERSION="${VERSION_TAGS[-1]}"
-            echo "✅ 筛选到最新版本：$REMOTE_VERSION"
+          # 核心修复：自定义版本排序（解决4.9.81 < 4.17的问题）
+          # 步骤1：将版本号补全为X.Y.Z格式（如4.17 → 4.17.0，4.9.81 → 4.9.81）
+          # 步骤2：按数字分段排序（主版本→次版本→补丁版本）
+          SORTED_VERSIONS=$(printf "%s\n" "${VERSION_TAGS[@]}" | while read -r ver; do
+            # 补全版本号为3段
+            if [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]]; then
+              echo "$ver.0"
+            else
+              echo "$ver"
+            fi
+          done | sort -t. -k1,1n -k2,2n -k3,3n)
+          
+          # 步骤3：还原原始版本格式（去掉补全的.0）
+          FINAL_SORTED=()
+          while read -r sorted_ver; do
+            # 去掉末尾的.0（仅当是补全的情况）
+            if [[ "$sorted_ver" =~ ^([0-9]+\.[0-9]+)\.0$ ]]; then
+              FINAL_SORTED+=("${BASH_REMATCH[1]}")
+            else
+              FINAL_SORTED+=("$sorted_ver")
+            fi
+          done <<< "$SORTED_VERSIONS"
+          
+          # 步骤4：获取最新版本（数组最后一个元素）
+          if [ ${#FINAL_SORTED[@]} -gt 0 ]; then
+            REMOTE_VERSION="${FINAL_SORTED[-1]}"
+            echo "✅ 修复排序后筛选到最新版本：$REMOTE_VERSION"
+            echo "   排序前版本列表：${VERSION_TAGS[*]}"
+            echo "   排序后版本列表：${FINAL_SORTED[*]}"
           else
             echo "⚠️ 未找到有效版本，使用兜底版本：$REMOTE_VERSION"
           fi
@@ -293,7 +317,7 @@ jobs:
           echo "🚀 开始执行fnpack build..."
           fnpack build
           
-          # 查找打包文件（兼容多种命名）
+          # 查找打包后的fpk文件
           FPK_FILE=$(find . -name "*.fpk" -type f -print0 | xargs -0 ls -t | head -n1)
           if [ -z "$FPK_FILE" ] || [ ! -f "$FPK_FILE" ]; then
             echo "❌ 未找到打包后的fpk文件"
