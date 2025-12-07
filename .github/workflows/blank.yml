@@ -48,39 +48,78 @@ jobs:
             git commit -m "chore: 初始化manifest文件" || echo "无需要提交的变更"
           fi
 
-      - name: 5. 获取napcat-docker最新版本号（过滤latest）
+      - name: 5. 获取napcat-docker最新版本号（增强版Docker Hub API调用）
         id: remote_ver
         run: |
-          # 重试3次获取有效版本号
+          set -euo pipefail
+          
+          # 定义Docker Hub API地址（兼容v2）
+          DOCKER_HUB_API="https://hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags"
+          REMOTE_VERSION=""
+          REMOTE_DIGEST=""
+          
+          # 重试3次获取有效版本号（增强版）
           for i in {1..3}; do
-            REMOTE_VERSION=$(curl -sSL --retry 3 --connect-timeout 10 \
-              "https://hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags?page_size=20&ordering=last_updated" \
-              | jq -r '.results[].name' \
-              | grep -v -E '^latest$|^dev$|^beta$' \
-              | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-              | head -n1)
+            echo "📡 第${i}次尝试获取Docker Hub标签列表..."
             
-            if [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "null" ]; then
-              break
+            # 1. 获取完整标签数据（带分页、增加超时）
+            TAG_DATA=$(curl -sSL --retry 3 --connect-timeout 15 --max-time 30 \
+              -H "Accept: application/json" \
+              "${DOCKER_HUB_API}?page_size=100&ordering=-last_updated")
+            
+            # 2. 调试：输出原始API返回（关键！便于排查格式问题）
+            echo "🔍 第${i}次API返回数据（前500字符）："
+            echo "$TAG_DATA" | head -c 500
+            echo -e "\n"
+            
+            # 3. 检查API返回是否有效
+            if [ -z "$TAG_DATA" ] || echo "$TAG_DATA" | jq -e '.results' >/dev/null 2>&1; then
+              # 4. 优化版本筛选规则（兼容更多格式）
+              # 支持：纯数字版本（4.9.80）、带v前缀（v4.9.80）、带build号（4.9.80-1）
+              REMOTE_VERSION=$(echo "$TAG_DATA" | jq -r \
+                '.results[].name' \
+                | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$|^test$' \
+                | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?$' \
+                | sed 's/^v//' | sort -V | tail -n1)  # 按版本号排序取最新
+              
+              # 5. 检查是否获取到版本号
+              if [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "null" ]; then
+                echo "✅ 第${i}次获取成功，原始版本号：$REMOTE_VERSION"
+                break
+              fi
             fi
-            echo "⚠️ 第${i}次获取版本号失败，重试中..."
+            
+            echo "⚠️ 第${i}次获取版本号失败，3秒后重试..."
             sleep 3
           done
           
-          # 终极兜底
+          # 6. 终极兜底（若仍失败）
           if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
-            echo "❌ 获取远程版本失败，使用兜底版本"
+            echo "❌ 所有尝试均失败，使用兜底版本：4.9.80"
             REMOTE_VERSION="4.9.80"
           fi
           
-          # 获取镜像哈希（用于版本比对）
-          REMOTE_DIGEST=$(skopeo inspect docker://mlikiowa/napcat-docker:${REMOTE_VERSION} 2>/dev/null | jq -r '.Digest')
-          if [ "$REMOTE_DIGEST" = "null" ] || [ -z "$REMOTE_DIGEST" ]; then
+          # 7. 获取该版本的镜像哈希（增强版）
+          echo "📌 获取版本 ${REMOTE_VERSION} 的镜像哈希..."
+          for i in {1..3}; do
+            DIGEST_DATA=$(skopeo inspect --format '{{.Digest}}' docker://mlikiowa/napcat-docker:${REMOTE_VERSION} 2>/dev/null)
+            if [ -n "$DIGEST_DATA" ] && [ "$DIGEST_DATA" != "<no value>" ]; then
+              REMOTE_DIGEST=$DIGEST_DATA
+              break
+            fi
+            echo "⚠️ 第${i}次获取哈希失败，重试中..."
+            sleep 2
+          done
+          
+          # 8. 哈希兜底
+          if [ -z "$REMOTE_DIGEST" ]; then
+            echo "❌ 未获取到镜像哈希，使用空值"
             REMOTE_DIGEST=""
           fi
           
-          echo "远程最新版本：$REMOTE_VERSION"
-          echo "远程镜像哈希：$REMOTE_DIGEST"
+          # 9. 输出最终结果
+          echo "✅ 远程最新版本：$REMOTE_VERSION"
+          echo "✅ 远程镜像哈希：$REMOTE_DIGEST"
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
           echo "remote_digest=$REMOTE_DIGEST" >> $GITHUB_OUTPUT
           echo "arch=Linux-AMD64" >> $GITHUB_OUTPUT  # 固定架构
@@ -230,12 +269,12 @@ jobs:
           
           # 检查并创建README.md
           if [ ! -f "README.md" ]; then
-            echo "# FnDepot\n\n| **NapCatQQ** | ${{ steps.remote_ver.outputs.remote_version }} | napcat-docker/https://hub.docker.com/r/mlikiowa/napcat-docker |\n\nnapcat-docker是通过Github-Actions进行每天自动化检测最新版本进行打包推送到本仓库\n脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq" > README.md
+            echo "# FnDepot\n\n| **NapCatQQ** | ${{ steps.remote_ver.outputs.remote_version }} | NapCatQQ/https://github.com/NapNeko/NapCatQQ |\n\nNapCatQQ是通过Github-Actions进行每天自动化检测最新版本进行打包推送到本仓库\n脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq" > README.md
             echo "✅ 创建默认的README.md文件"
           else
             # 精准更新表格版本号
             sed -i -E \
-              "s/(\|\s*\*\*NapCatQQ\*\*\s*\|\s*)[0-9.]+\s*(\|\s*napcat-docker\/https:\/\/hub.docker.com\/r\/mlikiowa\/napcat-docker\s*\|)/\1${{ steps.remote_ver.outputs.remote_version }}\2/g" \
+              "s/(\|\s*\*\*NapCatQQ\*\*\s*\|\s*)[0-9.]+\s*(\|\s*NapCatQQ\/https:\/\/hub.docker.com\/r\/mlikiowa\/napcat-docker\s*\|)/\1${{ steps.remote_ver.outputs.remote_version }}\2/g" \
               README.md
               
             echo "✅ README.md中NapCatQQ表格版本已更新为：${{ steps.remote_ver.outputs.remote_version }}"
@@ -243,7 +282,7 @@ jobs:
           
           # 输出关键内容
           echo "📄 更新后的README.md关键内容："
-          grep -A 1 -B 1 "napcat-docker" README.md
+          grep -A 1 -B 1 -i "napcat" README.md
 
       - name: 16. 提交并推送所有变更到FnDepot仓库
         if: steps.compare.outputs.need_update == 'true'
