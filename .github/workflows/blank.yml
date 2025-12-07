@@ -219,24 +219,15 @@ jobs:
       - name: 10. 下载并安装fnpack
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          set -euo pipefail
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
-          FNPACK_PATH="/usr/local/bin/fnpack"
+          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
+          chmod +x /usr/local/bin/fnpack
           
-          # 下载（带重试）
-          curl -SL --retry 3 --connect-timeout 10 --max-time 30 \
-            -o "$FNPACK_PATH" "$FNPACK_URL"
-          
-          # 赋予执行权限
-          chmod +x "$FNPACK_PATH"
-          
-          # 验证安装
-          if ! fnpack --version &>/dev/null; then
+          if ! command -v fnpack &>/dev/null; then
             echo "❌ fnpack安装失败"
             exit 1
           fi
-          
-          echo "✅ fnpack安装完成：$(fnpack --version | head -n1)"
+          echo "✅ fnpack安装完成：$(which fnpack)"
 
       - name: 11. 执行fnpack打包
         if: steps.compare.outputs.need_update == 'true'
