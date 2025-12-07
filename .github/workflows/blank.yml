@@ -48,88 +48,94 @@ jobs:
             git commit -m "chore: 初始化manifest文件" || echo "无需要提交的变更"
           fi
 
-      - name: 5. 获取napcat-docker最新版本号（精准适配API返回）
+      - name: 5. 获取napcat-docker所有标签（分页遍历）+ 最新版本号
         id: remote_ver
         run: |
           set -euo pipefail
           
-          # 定义Docker Hub API地址
+          # 初始化变量
           DOCKER_HUB_API="https://hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags"
+          NEXT_PAGE="$DOCKER_HUB_API?page_size=100&ordering=-last_updated"
+          ALL_TAGS=""
           REMOTE_VERSION=""
           REMOTE_DIGEST=""
+          MAX_PAGES=10  # 限制最大页数，避免无限循环
+          PAGE_COUNT=0
           
-          # 重试3次获取有效版本号（基于实际API返回格式）
-          for i in {1..3}; do
-            echo "📡 第${i}次尝试获取Docker Hub标签列表..."
+          echo "📡 开始分页获取所有Docker Hub标签..."
+          
+          # ===================== 核心：分页遍历所有标签 =====================
+          while [ -n "$NEXT_PAGE" ] && [ "$NEXT_PAGE" != "null" ] && [ $PAGE_COUNT -lt $MAX_PAGES ]; do
+            PAGE_COUNT=$((PAGE_COUNT + 1))
+            echo "🔄 获取第${PAGE_COUNT}页标签，URL：$NEXT_PAGE"
             
-            # 1. 获取完整标签数据（page_size=100确保获取足够多标签）
-            TAG_DATA=$(curl -sSL --retry 3 --connect-timeout 15 --max-time 30 \
+            # 获取当前页数据
+            PAGE_DATA=$(curl -sSL --retry 3 --connect-timeout 15 --max-time 30 \
               -H "Accept: application/json" \
-              "${DOCKER_HUB_API}?page_size=100&ordering=-last_updated")
+              "$NEXT_PAGE")
             
-            # 2. 调试：输出所有标签名称（关键！验证筛选逻辑）
-            echo "🔍 所有标签名称："
-            echo "$TAG_DATA" | jq -r '.results[].name'
-            
-            # 3. 精准筛选：提取带v前缀的数字版本号（v4.9.81、v4.9.80等）
-            # 步骤1：提取所有非latest的标签
-            # 步骤2：筛选以v开头+数字版本的标签
-            # 步骤3：去除v前缀
-            # 步骤4：按语义化版本排序取最新
-            REMOTE_VERSION=$(echo "$TAG_DATA" | jq -r '.results[].name' \
-              | grep -v -E '^latest$' \
-              | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
-              | sed 's/^v//' \
-              | sort -V \
-              | tail -n1)
-            
-            # 4. 检查是否获取到版本号
-            if [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "null" ]; then
-              echo "✅ 第${i}次获取成功，最新版本号：$REMOTE_VERSION"
-              break
+            # 提取当前页标签名称
+            PAGE_TAGS=$(echo "$PAGE_DATA" | jq -r '.results[].name')
+            if [ -n "$PAGE_TAGS" ] && [ "$PAGE_TAGS" != "null" ]; then
+              ALL_TAGS="$ALL_TAGS"$'\n'"$PAGE_TAGS"
+              echo "✅ 第${PAGE_COUNT}页获取到标签：$(echo "$PAGE_TAGS" | wc -l) 个"
             fi
             
-            echo "⚠️ 第${i}次获取版本号失败，3秒后重试..."
-            sleep 3
+            # 获取下一页URL（处理转义字符 \u0026 = &）
+            NEXT_PAGE=$(echo "$PAGE_DATA" | jq -r '.next' | sed 's/\u0026/\&/g')
           done
           
-          # 5. 终极兜底（若仍失败）
+          # ===================== 处理所有标签 =====================
+          echo -e "\n📊 总共获取到标签数量：$(echo "$ALL_TAGS" | grep -v '^$' | wc -l) 个"
+          echo "🔍 所有标签列表："
+          echo "$ALL_TAGS" | grep -v '^$' | sort
+          
+          # 筛选带v前缀的数字版本号 + 去v前缀 + 按语义化排序取最新
+          REMOTE_VERSION=$(echo "$ALL_TAGS" | grep -v '^$' \
+            | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$' \
+            | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+            | sed 's/^v//' \
+            | sort -V \
+            | tail -n1)
+          
+          # 终极兜底
           if [ -z "$REMOTE_VERSION" ] || [ "$REMOTE_VERSION" = "null" ]; then
-            echo "❌ 所有尝试均失败，使用兜底版本：4.9.81"
+            echo "❌ 未获取到有效版本号，使用兜底版本：4.9.81"
             REMOTE_VERSION="4.9.81"
           fi
           
-          # 6. 获取该版本的镜像哈希（带v前缀的原始标签）
+          # ===================== 获取镜像哈希（从完整标签数据中匹配） =====================
           ORIGINAL_TAG="v${REMOTE_VERSION}"
-          echo "📌 获取原始标签 ${ORIGINAL_TAG} 的镜像哈希..."
-          for i in {1..3}; do
-            # 优先用skopeo获取哈希
-            DIGEST_DATA=$(skopeo inspect --format '{{.Digest}}' docker://mlikiowa/napcat-docker:${ORIGINAL_TAG} 2>/dev/null)
-            # 备用：从API返回中提取哈希
-            if [ -z "$DIGEST_DATA" ] || [ "$DIGEST_DATA" = "<no value>" ]; then
-              DIGEST_DATA=$(echo "$TAG_DATA" | jq -r --arg tag "$ORIGINAL_TAG" '.results[] | select(.name == $tag) | .digest')
-            fi
-            if [ -n "$DIGEST_DATA" ] && [ "$DIGEST_DATA" != "null" ]; then
-              REMOTE_DIGEST=$DIGEST_DATA
-              break
-            fi
-            echo "⚠️ 第${i}次获取哈希失败，重试中..."
-            sleep 2
-          done
+          echo -e "\n📌 查找原始标签 ${ORIGINAL_TAG} 的哈希..."
           
-          # 7. 哈希兜底
+          # 重新获取该标签的完整数据（确保哈希准确）
+          TAG_DETAIL=$(curl -sSL --retry 3 --connect-timeout 15 --max-time 30 \
+            -H "Accept: application/json" \
+            "${DOCKER_HUB_API}?page_size=100&name=${ORIGINAL_TAG}")
+          
+          # 提取哈希
+          REMOTE_DIGEST=$(echo "$TAG_DETAIL" | jq -r --arg tag "$ORIGINAL_TAG" '.results[] | select(.name == $tag) | .digest')
+          
+          # 备用：skopeo获取
           if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ]; then
+            echo "⚠️ 从API提取哈希失败，尝试用skopeo获取..."
+            REMOTE_DIGEST=$(skopeo inspect --format '{{.Digest}}' docker://mlikiowa/napcat-docker:${ORIGINAL_TAG} 2>/dev/null)
+          fi
+          
+          # 哈希兜底
+          if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ] || [ "$REMOTE_DIGEST" = "<no value>" ]; then
             echo "❌ 未获取到镜像哈希，使用空值"
             REMOTE_DIGEST=""
           fi
           
-          # 8. 输出最终结果
-          echo "✅ 远程最新版本（去v前缀）：$REMOTE_VERSION"
-          echo "✅ 远程原始标签：v$REMOTE_VERSION"
-          echo "✅ 远程镜像哈希：$REMOTE_DIGEST"
+          # ===================== 输出最终结果 =====================
+          echo -e "\n✅ 最终获取结果："
+          echo "   最新版本号（去v前缀）：$REMOTE_VERSION"
+          echo "   原始Docker标签：$ORIGINAL_TAG"
+          echo "   镜像哈希：$REMOTE_DIGEST"
           echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
           echo "remote_digest=$REMOTE_DIGEST" >> $GITHUB_OUTPUT
-          echo "arch=Linux-AMD64" >> $GITHUB_OUTPUT  # 固定架构
+          echo "arch=Linux-AMD64" >> $GITHUB_OUTPUT
 
       - name: 6. 读取本地哈希记录（避免版本号相同但镜像更新）
         id: local_digest
@@ -322,6 +328,7 @@ jobs:
             - 更新时间：${{ github.run_at }}
             - 打包工具：fnpack 1.0.4
             - 镜像哈希：${{ steps.remote_ver.outputs.remote_digest }}
+            - 标签获取：遍历${{ steps.remote_ver.outputs.page_count }}页Docker Hub标签
             - FnDepot仓库：https://github.com/moxyis/FnDepot/tree/main/fpk-napcatqq
           prerelease: false
           files: ${{ steps.build_fpk.outputs.fpk_release_file }}
