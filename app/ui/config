@@ -1,0 +1,13 @@
+{
+    ".url": {
+        "fpk-napcatqq.Application": {
+            "title": "NapCatQQ",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "",
+            "port": "6099",
+            "url": "/",
+            "allUsers": false
+        }
+    }
+}

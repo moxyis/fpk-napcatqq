@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+    napcat:
+        environment:
+            - NAPCAT_UID=${NAPCAT_UID}
+            - NAPCAT_GID=${NAPCAT_GID}
+            - WEBUI_TOKEN=qq123456
+        ports:
+            - 3000:3000
+            - 3001:3001
+            - "${TRIM_SERVICE_PORT}:6099"
+        volumes:
+            - "/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/config:/app/napcat/config"
+            - "/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/ntqq:/app/.config/QQ"
+        container_name: napcat
+        network_mode: bridge
+        restart: always
+        image: mlikiowa/napcat-docker:latest

@@ -1,0 +1,28 @@
+{
+    "docker-project":
+    {
+        "projects":
+        [
+            {
+                "name": "fpk-napcatqq",
+                "path": "docker"
+            }
+        ]
+    },
+    "data-share":
+    {
+        "shares":
+        [
+            {
+                "name": "fpk-napcatqq",
+                "permission":
+                {
+                    "rw":
+                    [
+                        "docker-fpk-napcatqq"
+                    ]
+                }
+            }
+        ]
+    }
+}
