@@ -1,8 +1,0 @@
-{
-    "defaults":
-    {
-        "run-as": "package"
-    },
-    "username": "docker-fpk-napcatqq",
-    "groupname": "docker-fpk-napcatqq"
-}
