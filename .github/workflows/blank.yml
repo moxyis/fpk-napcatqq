@@ -156,7 +156,7 @@ jobs:
           fi
 
       - name: 8. 更新manifest
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           sed -i -E \
             "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
@@ -169,14 +169,15 @@ jobs:
           git add fpk-napcatqq/manifest docker-image-digest.txt
 
       - name: 9. 提交manifest变更
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
-          git commit -m "更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)" || echo "无需提交"
+          commit_msg="更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)"
+          git commit -m "$commit_msg" || echo "无需提交"
           git push origin HEAD:${{ github.ref_name }}
           echo "manifest已推送"
 
       - name: 10. 安装fnpack
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
           curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
@@ -189,7 +190,7 @@ jobs:
           echo "fnpack安装完成"
 
       - name: 11. 打包
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         id: build_fpk
         run: |
           cd fpk-napcatqq
@@ -216,13 +217,13 @@ jobs:
           echo "fpk_release_name=$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
 
       - name: 12. 克隆FnDepot仓库
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
           echo "FnDepot仓库克隆完成"
 
       - name: 13. 复制打包文件
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           mkdir -p /tmp/FnDepot/fpk-napcatqq
           rm -f /tmp/FnDepot/fpk-napcatqq/fpk-napcatqq.fpk
@@ -232,7 +233,7 @@ jobs:
           ls -lh /tmp/FnDepot/fpk-napcatqq/
 
       - name: 14. 更新fnpack.json
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           cd /tmp/FnDepot
           
@@ -248,19 +249,20 @@ jobs:
           cat fnpack.json
 
       - name: 15. 更新README.md
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           cd /tmp/FnDepot
           
           if [ ! -f "README.md" ]; then
-            cat > README.md << EOF
+            cat > README.md << 'EOF'
 # FnDepot
 
-| **NapCatQQ** | ${{ steps.remote_ver.outputs.remote_version }} | NapCatQQ/https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags |
+| **NapCatQQ** | __VERSION__ | NapCatQQ/https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags |
 
 NapCatQQ是通过Github-Actions调用Docker Hub V2 API自动化检测最新版本进行打包推送到本仓库
 脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq
 EOF
+            sed -i "s/__VERSION__/${{ steps.remote_ver.outputs.remote_version }}/g" README.md
             echo "创建README.md"
           else
             sed -i -E \
@@ -272,17 +274,18 @@ EOF
           grep -A 1 -B 1 -i "napcat" README.md
 
       - name: 16. 提交FnDepot变更
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         run: |
           cd /tmp/FnDepot
           
+          commit_msg="更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)"
           git add fpk-napcatqq/${{ steps.build_fpk.outputs.fpk_name }} fnpack.json README.md
-          git commit -m "更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)" || echo "无需提交"
+          git commit -m "$commit_msg" || echo "无需提交"
           git push origin main
           echo "FnDepot变更已推送"
 
       - name: 17. 创建Release
-        if: steps.compare.outputs.need_update == 'true'
+        if: ${{ steps.compare.outputs.need_update == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "napcat-docker-v${{ steps.remote_ver.outputs.remote_version }}-${{ steps.remote_ver.outputs.arch }}"
