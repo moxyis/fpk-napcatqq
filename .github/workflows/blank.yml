@@ -333,27 +333,27 @@ jobs:
           set -euo pipefail
           README_FILE="/tmp/FnDepot/README.md"
           NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
-    
+          
           # 初始化README（兼容现有格式）
           if [ ! -f "$README_FILE" ]; then
-          echo "# FnDepot" > "$README_FILE"
-          echo "" >> "$README_FILE"
-          echo "| **NapCatQQ**            | $NEW_VER | NapNeko/https://github.com/NapNeko/NapCatQQ          |Docker|" >> "$README_FILE"
-          echo "" >> "$README_FILE"
-          echo "NapCatQQ是通过Github-Actions进行每天自动化检测最新NapCatQQ版本进行打包推送到本仓库，上方的应用清单的NapCatQQ对应版本号暂时不会自动更新" >> "$README_FILE"
-          echo "脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq" >> "$README_FILE"
-          echo "✅ 创建默认README.md（兼容现有格式）"
-           else
-           # 修复后的sed规则：兼容任意空格、行尾Docker后缀、链接格式
-          sed -i -E \
-        's/(\|\s*\*\*?NapCatQQ\*\*?\s*\|\s*)[0-9.]+\s*(\|.*NapNeko\/https:\/\/github\.com\/NapNeko\/NapCatQQ.*)/\1'"${NEW_VER}"'\2/' \
-        "$README_FILE"
-      echo "✅ README.md版本号已更新为：$NEW_VER"
-    fi
-    
-    # 输出关键内容验证
-    echo "📄 更新后的README.md关键内容："
-    grep -A 2 -B 1 "NapCatQQ" "$README_FILE"
+            echo "# FnDepot" > "$README_FILE"
+            echo "" >> "$README_FILE"
+            echo "| **NapCatQQ**            | $NEW_VER | NapNeko/https://github.com/NapNeko/NapCatQQ          |Docker|" >> "$README_FILE"
+            echo "" >> "$README_FILE"
+            echo "NapCatQQ是通过Github-Actions进行每天自动化检测最新NapCatQQ版本进行打包推送到本仓库，上方的应用清单的NapCatQQ对应版本号暂时不会自动更新" >> "$README_FILE"
+            echo "脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq" >> "$README_FILE"
+            echo "✅ 创建默认README.md（兼容现有格式）"
+          else
+            # 修复后的sed规则：兼容任意空格、行尾Docker后缀、链接格式
+            sed -i -E \
+              's/(\|\s*\*\*?NapCatQQ\*\*?\s*\|\s*)[0-9.]+\s*(\|.*NapNeko\/https:\/\/github\.com\/NapNeko\/NapCatQQ.*)/\1'"${NEW_VER}"'\2/' \
+              "$README_FILE"
+            echo "✅ README.md版本号已更新为：$NEW_VER"
+          fi
+          
+          # 输出关键内容验证
+          echo "📄 更新后的README.md关键内容："
+          grep -A 2 -B 1 "NapCatQQ" "$README_FILE"
 
       - name: 16. 提交并推送FnDepot变更
         if: steps.compare.outputs.need_update == 'true'
@@ -378,7 +378,17 @@ jobs:
           echo "✅ FnDepot仓库更新完成：https://github.com/moxyis/FnDepot/tree/main/fpk-napcatqq"
 
       # ===================== 第五步：创建GitHub Release =====================
-      - name: 17. 创建Release并上传FPK
+      - name: 17. 删除旧Tag（如需覆盖）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          TAG_NAME="napcat-docker-v${{ steps.remote_ver.outputs.remote_version }}-${{ steps.remote_ver.outputs.arch }}"
+          # 删除远程Tag（忽略不存在的错误）
+          git push origin --delete "$TAG_NAME" 2>/dev/null || echo "⚠️ 旧Tag $TAG_NAME 不存在，无需删除"
+          # 删除本地Tag
+          git tag -d "$TAG_NAME" 2>/dev/null || true
+
+      - name: 18. 创建Release并上传FPK
         if: steps.compare.outputs.need_update == 'true'
         uses: softprops/action-gh-release@v2
         with:
@@ -398,12 +408,12 @@ jobs:
             - FnDepot仓库：https://github.com/moxyis/FnDepot/tree/main/fpk-napcatqq
           prerelease: false
           files: ${{ steps.build_fpk.outputs.fpk_release_file }}
-          overwrite: true  # 覆盖同名标签
+          overwrite_files: true  # 仅覆盖文件（保留Tag/Release）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ===================== 第六步：异常处理与日志上传 =====================
-      - name: 18. 上传调试日志（仅失败时）
+      - name: 19. 上传调试日志（仅失败时）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
