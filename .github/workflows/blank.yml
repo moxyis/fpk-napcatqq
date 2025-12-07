@@ -234,28 +234,75 @@ jobs:
           cp "${{ steps.build_fpk.outputs.fpk_release_file }}" /tmp/FnDepot/fpk-napcatqq/
           echo "✅ fpk文件已复制到FnDepot"
 
-      - name: 14. 更新FnDepot元数据
+      - name: 14. 更新FnDepot的fnpack.json
         if: steps.compare.outputs.need_update == 'true'
         run: |
           set -euo pipefail
           VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           JSON_FILE="/tmp/FnDepot/fnpack.json"
+          
+          # 初始化JSON文件（若不存在）
+          [ ! -f "$JSON_FILE" ] && echo '{}' > "$JSON_FILE"
+          
+          # 更新版本号（确保结构正确）
+          jq --arg ver "$VERSION" \
+            '.["fpk-napcatqq"] = (.["fpk-napcatqq"] // {}) | .["fpk-napcatqq"].version = $ver' \
+            "$JSON_FILE" > "$JSON_FILE.tmp" && mv "$JSON_FILE.tmp" "$JSON_FILE"
+          
+          echo "✅ fnpack.json更新完成：$(cat "$JSON_FILE")"
+
+      - name: 15. 更新FnDepot的README.md（修复匹配规则）
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           README_FILE="/tmp/FnDepot/README.md"
           
-          jq --arg ver "$VERSION" '.["fpk-napcatqq"].version = $ver' "$JSON_FILE" > "$JSON_FILE.tmp"
-          mv "$JSON_FILE.tmp" "$JSON_FILE"
+          # 初始化README（若不存在）
+          if [ ! -f "$README_FILE" ]; then
+            echo "# FnDepot" > "$README_FILE"
+            echo "" >> "$README_FILE"
+            echo "| 应用名称       | 版本号   | 来源仓库                                  | 类型   |" >> "$README_FILE"
+            echo "|----------------|----------|-------------------------------------------|--------|" >> "$README_FILE"
+            echo "| **NapCatQQ**   | $VERSION | NapNeko/https://github.com/NapNeko/NapCatQQ | Docker |" >> "$README_FILE"
+            echo "" >> "$README_FILE"
+            echo "自动更新说明：每日同步最新版本" >> "$README_FILE"
+            echo "✅ 初始化README.md完成"
+          else
+            # 修复匹配规则：精确匹配NapCatQQ所在行的版本号（兼容任意空格和格式）
+            sed -i -E \
+              's/(^\|.*\*\*NapCatQQ\*\*.*\|[[:space:]]*)[0-9.]+([[:space:]]*\|.*$)/\1'"${VERSION}"'\2/' \
+              "$README_FILE"
+            echo "✅ README.md版本号已更新为：$VERSION"
+          fi
           
-          sed -i -E "s/(NapCatQQ\s*\|\s*)[0-9.]+/\1$VERSION/" "$README_FILE"
+          # 验证更新结果
+          echo -e "\n📄 README.md关键内容："
+          grep -A 1 "NapCatQQ" "$README_FILE"
+
+      - name: 16. 提交并推送FnDepot变更
+        if: steps.compare.outputs.need_update == 'true'
+        run: |
+          set -euo pipefail
+          cd /tmp/FnDepot
           
-          git -C /tmp/FnDepot add .
-          git -C /tmp/FnDepot commit -m "chore: 更新napcatqq至v$VERSION" || echo "✅ FnDepot无变更"
-          git -C /tmp/FnDepot push origin main || (
-            git -C /tmp/FnDepot pull --rebase origin main && git -C /tmp/FnDepot push origin main
+          # 暂存变更
+          git add fpk-napcatqq/ fnpack.json README.md
+          
+          # 提交
+          COMMIT_MSG="chore: 更新napcatqq至v${{ steps.remote_ver.outputs.remote_version }}"
+          git commit -m "$COMMIT_MSG" || echo "✅ FnDepot无变更"
+          
+          # 推送（带重试）
+          git push origin main || (
+            echo "⚠️ 推送失败，尝试拉取后重试" &&
+            git pull --rebase origin main &&
+            git push origin main
           )
-          echo "✅ FnDepot更新完成"
+          echo "✅ FnDepot仓库更新完成"
 
       # ===================== 第五步：创建GitHub Release =====================
-      - name: 15. 创建Release并上传文件
+      - name: 17. 创建Release并上传文件
         if: steps.compare.outputs.need_update == 'true'
         uses: softprops/action-gh-release@v2
         with:
@@ -273,7 +320,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ===================== 第六步：异常日志上传 =====================
-      - name: 16. 上传调试日志（失败时）
+      - name: 18. 上传调试日志（失败时）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -282,4 +329,5 @@ jobs:
             fpk-napcatqq/manifest
             docker-image-digest.txt
             /tmp/fpk_build/*
+            /tmp/FnDepot/README.md
           retention-days: 7
