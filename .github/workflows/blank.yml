@@ -365,7 +365,7 @@ jobs:
           git add fpk-napcatqq/ fnpack.json README.md
           
           # 提交
-          COMMIT_MSG="chore: 更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)"
+          COMMIT_MSG="chore: 更新fpk-napcatqq版本至${{ steps.remote_ver.outputs.remote_version }}"
           git commit -m "$COMMIT_MSG" || echo "✅ 无需要提交的变更"
           
           # 推送（带重试）
