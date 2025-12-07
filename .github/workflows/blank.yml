@@ -1,4 +1,4 @@
-name: 版本比对后自动打包fpk-napcatqq并更新仓库
+name: 自动构建FPK（检测Docker镜像更新）
 
 # 触发规则：每日UTC 0点（北京时间8点）执行 + 手动触发
 on:
@@ -14,17 +14,17 @@ permissions:
   actions: read
 
 jobs:
-  check-and-build:
+  检测并构建FPK:
     runs-on: ubuntu-latest
     steps:
       # 步骤1：拉取fpk-napcatqq仓库代码
-      - name: Checkout fpk-napcatqq Repository
+      - name: 拉取代码仓库
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # 步骤2：安装依赖 + 下载 fnpack 打包工具
-      - name: Install Dependencies & Fnpack
+      # 步骤2：安装依赖 + 下载 fnpack 打包工具（修复验证逻辑）
+      - name: 安装依赖并下载fnpack工具
         run: |
           # 安装基础依赖
           sudo apt-get update
@@ -35,16 +35,17 @@ jobs:
           wget -O /usr/local/bin/fnpack ${FNPACK_URL}
           chmod +x /usr/local/bin/fnpack
           
-          # 验证fnpack
-          if fnpack --version 2>/dev/null; then
-            echo "✅ fnpack 安装成功"
+          # 修复验证逻辑：不依赖--version，直接检查文件是否可执行
+          if [ -x /usr/local/bin/fnpack ]; then
+            echo "✅ fnpack 安装成功（可执行文件已存在）"
           else
-            echo "❌ fnpack 安装失败"
+            echo "❌ fnpack 安装失败（文件不可执行或不存在）"
+            ls -l /usr/local/bin/fnpack  # 输出文件信息便于排查
             exit 1
           fi
 
       # 步骤3：读取本地纯文本manifest和哈希记录
-      - name: Read Local Config
+      - name: 读取本地配置（版本+哈希）
         id: local-config
         run: |
           # 读取纯文本manifest的version
@@ -62,7 +63,7 @@ jobs:
           echo "✅ 本地记录 - 版本: ${LOCAL_VERSION}, 哈希: ${LOCAL_DIGEST}"
 
       # 步骤4：远程获取Docker镜像最新版本+哈希
-      - name: Get Remote Docker Info
+      - name: 获取远程Docker镜像信息
         id: remote-docker
         run: |
           DOCKER_REPO="mlikiowa/napcat-docker"
@@ -87,7 +88,7 @@ jobs:
           echo "✅ 远程镜像 - 版本: ${REMOTE_TAG}, 哈希: ${REMOTE_DIGEST}"
 
       # 步骤5：对比版本/哈希，判断是否更新
-      - name: Check Update Need
+      - name: 对比版本和哈希（判断是否更新）
         id: check-update
         run: |
           if [ "${{ steps.local-config.outputs.LOCAL_VERSION }}" != "${{ steps.remote-docker.outputs.REMOTE_TAG }}" ] || [ "${{ steps.local-config.outputs.LOCAL_DIGEST }}" != "${{ steps.remote-docker.outputs.REMOTE_DIGEST }}" ]; then
@@ -99,7 +100,7 @@ jobs:
           fi
 
       # 步骤6：先更新manifest和哈希记录（打包前更新）
-      - name: Update Config Files Before Build
+      - name: 打包前更新配置文件（manifest+哈希）
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         run: |
           # 更新纯文本manifest（打包前先改版本号）
@@ -109,7 +110,7 @@ jobs:
           echo "✅ 已更新manifest和哈希记录，当前版本: ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
 
       # 步骤7：进入fpk-napcatqq文件夹执行fnpack build打包
-      - name: Rebuild FPK with fnpack build
+      - name: 执行fnpack build打包FPK
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         run: |
           # 定义最终FPK文件名（符合规则：fpk-napcatqq-版本号-linux-amd64.fpk）
@@ -123,6 +124,7 @@ jobs:
           
           # 进入fpk-napcatqq文件夹执行fnpack build
           cd ./fpk-napcatqq
+          # 执行打包（不依赖--version输出，直接执行）
           fnpack build
           
           # 验证打包结果并按规则重命名
@@ -134,15 +136,16 @@ jobs:
             echo "✅ FPK打包成功，文件命名为: ${FPK_FILENAME}"
           else
             echo "❌ 未找到fnpack build生成的FPK文件"
+            ls -l  # 输出文件夹内容便于排查
             exit 1
           fi
 
       # 步骤8：提交fpk-napcatqq仓库的配置变更（manifest+哈希）
-      - name: Commit Config Changes to fpk-napcatqq
+      - name: 提交配置文件变更到仓库
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: update to napcat-docker ${VERSION} (digest: ${DIGEST})"
+          commit_message: "chore: 更新到napcat-docker ${VERSION} (digest: ${DIGEST})"
           commit_user_name: "GitHub Actions"
           commit_user_email: "actions@github.com"
           file_pattern: |
@@ -152,8 +155,8 @@ jobs:
           VERSION: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
           DIGEST: ${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
 
-      # 步骤9：推送FPK到FnDepot仓库的fpk-napcatqq文件夹（统一命名为fpk-napcatqq.fpk）
-      - name: Push FPK to FnDepot Repository
+      # 步骤9：推送FPK到FnDepot仓库的fpk-napcatqq文件夹
+      - name: 推送FPK文件到FnDepot仓库
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         env:
           PAT: ${{ secrets.FNDEPOT_PAT }}
@@ -176,24 +179,24 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add ./fpk-napcatqq/${FPK_FNDEPOT_NAME}
-          git commit -m "update fpk-napcatqq.fpk to version ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
+          git commit -m "更新fpk-napcatqq.fpk到版本 ${{ steps.remote-docker.outputs.REMOTE_TAG }}"
           git push origin main
           echo "✅ FPK已推送到FnDepot/fpk-napcatqq/ (命名为: ${FPK_FNDEPOT_NAME})"
 
-      # 步骤10：发布到fpk-napcatqq仓库的GitHub Release（适配命名/标题规则）
-      - name: Create GitHub Release
+      # 步骤10：发布到GitHub Release（适配命名/标题规则）
+      - name: 发布FPK到GitHub Release
         if: steps.check-update.outputs.NEED_UPDATE == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.remote-docker.outputs.REMOTE_TAG }}
           name: "fpk-napcatqq ${{ steps.remote-docker.outputs.REMOTE_TAG }}"  # Release标题规则
           body: |
-            ### Auto-built FPK Package
-            - Docker Image: ${{ steps.remote-docker.outputs.REMOTE_REPO }}@${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
-            - Manifest Version: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
-            - Build Command: fnpack build (in fpk-napcatqq folder)
-            - Platform: linux-amd64
-            - FPK File (FnDepot): fpk-napcatqq.fpk
+            ### 自动构建的FPK包
+            - Docker镜像: ${{ steps.remote-docker.outputs.REMOTE_REPO }}@${{ steps.remote-docker.outputs.REMOTE_DIGEST }}
+            - Manifest版本: ${{ steps.remote-docker.outputs.REMOTE_TAG }}
+            - 构建命令: fnpack build（在fpk-napcatqq文件夹执行）
+            - 平台架构: linux-amd64
+            - FnDepot文件名: fpk-napcatqq.fpk
           files: ./fpk-napcatqq-${{ steps.remote-docker.outputs.REMOTE_TAG }}-linux-amd64.fpk  # Release文件命名规则
           draft: false
           prerelease: false
