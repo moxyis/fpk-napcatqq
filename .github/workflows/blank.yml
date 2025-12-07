@@ -1,309 +1,89 @@
-name: 版本比对后自动打包napcat-docker并更新仓库
+name: 更新FnDepot的NapCatQQ版本号
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'  # 每日UTC 0点执行
 
 jobs:
-  build:
+  update-readme:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: read
+      contents: write  # 需写入权限推送变更
     steps:
-      - name: 1. 检出代码
+      - name: 1. 检出FnDepot仓库
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: moxyis/FnDepot  # 目标仓库
+          token: ${{ secrets.FnDepot_PAT }}  # 访问令牌
+          path: FnDepot  # 检出到FnDepot目录
 
       - name: 2. 配置Git身份
         run: |
+          cd FnDepot
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: 3. 安装依赖
+      - name: 3. 获取最新NapCatQQ版本号（从Docker Hub）
+        id: get_version
         run: |
-          sudo apt update && sudo apt install -y jq curl sed skopeo
-          echo "依赖安装完成"
-
-      - name: 4. 读取本地版本
-        id: local_ver
-        run: |
-          if [ -f "fpk-napcatqq/manifest" ]; then
-            LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' fpk-napcatqq/manifest \
-              | tr -d '"' | tr -d "'" | sed 's/^v//' | xargs)
-            echo "本地版本：$LOCAL_VERSION"
-            echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
-          else
-            echo "未找到manifest，使用默认版本"
-            echo "local_version=0.0.0" >> $GITHUB_OUTPUT
-            mkdir -p fpk-napcatqq
-            echo "version: 0.0.0" > fpk-napcatqq/manifest
-            git add fpk-napcatqq/manifest
-            git commit -m "初始化manifest" || echo "无需提交"
-          fi
-
-      - name: 5. 获取Docker Hub标签
-        id: remote_ver
-        run: |
-          set -euo pipefail
-          
+          # 调用Docker Hub API获取最新版本
           API_URL="https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags"
-          ALL_TAGS=()
-          NEXT_PAGE="$API_URL?page_size=100&ordering=-last_updated"
-          MAX_PAGES=20
-          PAGE_COUNT=0
-          REMOTE_VERSION=""
-          REMOTE_DIGEST=""
+          RESPONSE=$(curl -sSL "$API_URL?page_size=100&ordering=-last_updated")
           
-          echo "开始获取Docker Hub标签..."
-          
-          while [ -n "$NEXT_PAGE" ] && [ "$NEXT_PAGE" != "null" ] && [ $PAGE_COUNT -lt $MAX_PAGES ]; do
-            PAGE_COUNT=$((PAGE_COUNT + 1))
-            echo "获取第${PAGE_COUNT}页：$NEXT_PAGE"
-            
-            RESPONSE=$(curl -sSL --retry 3 --connect-timeout 15 --max-time 30 \
-              -H "Accept: application/json" \
-              -H "Content-Type: application/json" \
-              "$NEXT_PAGE")
-            
-            if ! echo "$RESPONSE" | jq -e '.results' >/dev/null 2>&1; then
-              echo "第${PAGE_COUNT}页响应无效"
-              break
-            fi
-            
-            PAGE_TAGS=$(echo "$RESPONSE" | jq -r '.results[].name' | grep -v '^$' | sort -u)
-            
-            while IFS= read -r tag; do
-              if [ -n "$tag" ]; then
-                ALL_TAGS+=("$tag")
-              fi
-            done <<< "$PAGE_TAGS"
-            
-            NEXT_PAGE=$(echo "$RESPONSE" | jq -r '.next' | sed -e 's/\u0026/\&/g' -e 's/^null$//')
-            echo "第${PAGE_COUNT}页获取到$(echo "$PAGE_TAGS" | wc -l)个标签"
-          done
-          
-          UNIQUE_TAGS=($(printf "%s\n" "${ALL_TAGS[@]}" | sort -u))
-          echo "总标签数：${#UNIQUE_TAGS[@]}"
-          
-          VERSION_TAGS=($(printf "%s\n" "${UNIQUE_TAGS[@]}" \
-            | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$|^test$' \
-            | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+          # 筛选有效版本标签（v+数字格式）并取最新
+          LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.results[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
             | sed 's/^v//' \
-            | sort -V))
+            | sort -V \
+            | tail -n1)
           
-          if [ ${#VERSION_TAGS[@]} -gt 0 ]; then
-            REMOTE_VERSION="${VERSION_TAGS[-1]}"
-          else
-            echo "未找到有效版本，使用兜底版本"
-            REMOTE_VERSION="4.9.81"
+          # 兜底版本
+          if [ -z "$LATEST_VERSION" ]; then
+            LATEST_VERSION="4.9.81"
           fi
           
-          ORIGINAL_TAG="v${REMOTE_VERSION}"
-          echo "查找标签${ORIGINAL_TAG}的哈希..."
-          
-          TAG_DIGEST=$(echo "$RESPONSE" | jq -r --arg tag "$ORIGINAL_TAG" '.results[] | select(.name == $tag) | .digest')
-          
-          if [ -z "$TAG_DIGEST" ] || [ "$TAG_DIGEST" = "null" ]; then
-            echo "重新请求标签详情"
-            TAG_DETAIL_URL="${API_URL}?page_size=10&name=${ORIGINAL_TAG}"
-            TAG_DETAIL=$(curl -sSL --retry 2 --connect-timeout 10 "$TAG_DETAIL_URL")
-            TAG_DIGEST=$(echo "$TAG_DETAIL" | jq -r --arg tag "$ORIGINAL_TAG" '.results[] | select(.name == $tag) | .digest')
-          fi
-          
-          if [ -z "$TAG_DIGEST" ] || [ "$TAG_DIGEST" = "null" ]; then
-            echo "使用skopeo获取哈希"
-            TAG_DIGEST=$(skopeo inspect --format '{{.Digest}}' docker://mlikiowa/napcat-docker:${ORIGINAL_TAG} 2>/dev/null)
-          fi
-          
-          if [ -z "$TAG_DIGEST" ] || [ "$TAG_DIGEST" = "null" ] || [ "$TAG_DIGEST" = "<no value>" ]; then
-            REMOTE_DIGEST=""
-          else
-            REMOTE_DIGEST="$TAG_DIGEST"
-          fi
-          
-          echo "最终版本：$REMOTE_VERSION"
-          echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
-          echo "remote_digest=$REMOTE_DIGEST" >> $GITHUB_OUTPUT
-          echo "arch=Linux-AMD64" >> $GITHUB_OUTPUT
-          echo "total_tags=${#UNIQUE_TAGS[@]}" >> $GITHUB_OUTPUT
-          echo "total_pages=$PAGE_COUNT" >> $GITHUB_OUTPUT
+          echo "最新版本号：$LATEST_VERSION"
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
 
-      - name: 6. 读取本地哈希
-        id: local_digest
+      - name: 4. 更新README.md中的表格版本号
         run: |
-          if [ -f "docker-image-digest.txt" ]; then
-            LOCAL_DIGEST=$(cat docker-image-digest.txt | xargs)
-          else
-            LOCAL_DIGEST=""
-            touch docker-image-digest.txt
-          fi
-          echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
-          echo "本地哈希：$LOCAL_DIGEST"
-
-      - name: 7. 版本比对
-        id: compare
-        run: |
-          if [ "${{ steps.local_ver.outputs.local_version }}" = "${{ steps.remote_ver.outputs.remote_version }}" ] && [ "${{ steps.local_digest.outputs.local_digest }}" = "${{ steps.remote_ver.outputs.remote_digest }}" ]; then
-            echo "版本一致，无需更新"
-            echo "need_update=false" >> $GITHUB_OUTPUT
-          else
-            echo "版本不一致，开始更新"
-            echo "need_update=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: 8. 更新manifest
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          sed -i -E \
-            "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?)([0-9a-zA-Z.]+)([\"']?)/\1\2${{ steps.remote_ver.outputs.remote_version }}\4/" \
-            fpk-napcatqq/manifest
+          cd FnDepot
           
-          echo "${{ steps.remote_ver.outputs.remote_digest }}" > docker-image-digest.txt
-          
-          echo "manifest更新完成：${{ steps.remote_ver.outputs.remote_version }}"
-          cat fpk-napcatqq/manifest | grep -i version
-          git add fpk-napcatqq/manifest docker-image-digest.txt
-
-      - name: 9. 提交manifest变更
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          commit_msg="更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)"
-          git commit -m "$commit_msg" || echo "无需提交"
-          git push origin HEAD:${{ github.ref_name }}
-          echo "manifest已推送"
-
-      - name: 10. 安装fnpack
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          FNPACK_URL="https://static2.fnnas.com/fnpack/fnpack-1.0.4-linux-amd64"
-          curl -SL --retry 3 --connect-timeout 10 -o /usr/local/bin/fnpack "$FNPACK_URL"
-          chmod +x /usr/local/bin/fnpack
-          
-          if ! command -v fnpack &>/dev/null; then
-            echo "fnpack安装失败"
-            exit 1
-          fi
-          echo "fnpack安装完成"
-
-      - name: 11. 打包
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        id: build_fpk
-        run: |
-          cd fpk-napcatqq
-          echo "执行打包命令"
-          fnpack build
-          
-          FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
-          if [ -z "$FPK_FILE" ]; then
-            echo "未找到打包文件"
-            exit 1
-          fi
-          
-          FPK_FULL_PATH=$(pwd)/$FPK_FILE
-          FPK_FIXED_NAME="fpk-napcatqq.fpk"
-          FPK_VERSION_NAME="fpk-napcatqq-v${{ steps.remote_ver.outputs.remote_version }}-${{ steps.remote_ver.outputs.arch }}.fpk"
-          
-          mv "$FPK_FULL_PATH" /tmp/$FPK_FIXED_NAME
-          cp /tmp/$FPK_FIXED_NAME /tmp/$FPK_VERSION_NAME
-          
-          echo "打包完成"
-          echo "fpk_file=/tmp/$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
-          echo "fpk_name=$FPK_FIXED_NAME" >> $GITHUB_OUTPUT
-          echo "fpk_release_file=/tmp/$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
-          echo "fpk_release_name=$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
-
-      - name: 12. 克隆FnDepot仓库
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          git clone https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git /tmp/FnDepot
-          echo "FnDepot仓库克隆完成"
-
-      - name: 13. 复制打包文件
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          mkdir -p /tmp/FnDepot/fpk-napcatqq
-          rm -f /tmp/FnDepot/fpk-napcatqq/fpk-napcatqq.fpk
-          cp ${{ steps.build_fpk.outputs.fpk_file }} /tmp/FnDepot/fpk-napcatqq/
-          
-          echo "文件复制完成"
-          ls -lh /tmp/FnDepot/fpk-napcatqq/
-
-      - name: 14. 更新fnpack.json
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          cd /tmp/FnDepot
-          
-          if [ ! -f "fnpack.json" ]; then
-            echo '{"fpk-napcatqq": {"version": ""}}' > fnpack.json
-            echo "创建fnpack.json"
-          fi
-          
-          jq --arg ver "${{ steps.remote_ver.outputs.remote_version }}" \
-            '.["fpk-napcatqq"].version = $ver' fnpack.json > fnpack.tmp && mv fnpack.tmp fnpack.json
-          
-          echo "fnpack.json更新完成"
-          cat fnpack.json
-
-      - name: 15. 更新README.md
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          cd /tmp/FnDepot
-          
+          # 确保README.md存在
           if [ ! -f "README.md" ]; then
+            # 创建默认README（含标准表格结构）
             cat > README.md << 'EOF'
 # FnDepot
 
-| **NapCatQQ** | __VERSION__ | NapCatQQ/https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags |
+# | **名称**    | 版本号 | 仓库地址                                      | 类型   |
+# |-------------|--------|-----------------------------------------------|--------|
+# | **NapCatQQ** | 0.0.0  | https://github.com/NapNeko/NapCatQQ           | Docker |
+# EOF
+          # fi
+          
+          # 精准更新表格中的版本号（兼容现有结构）
+          # 匹配表格行格式：| **NapCatQQ** | 任意版本 | 仓库地址 | 类型 |
+          sed -i -E \
+            "s/(\\|\\s*\\*\\*NapCatQQ\\*\\*\\s*\\|\\s*)[0-9.]+(\\s*\\|\\s*https:\\/\\/github\\.com\\/NapNeko\\/NapCatQQ\\s*\\|\\s*Docker\\s*\\|)/\1${{ steps.get_version.outputs.latest_version }}\2/" \
+            README.md
+          
+          echo "更新后的表格内容："
+          grep -A 1 -B 1 "NapCatQQ" README.md  # 验证更新结果
 
-NapCatQQ是通过Github-Actions调用Docker Hub V2 API自动化检测最新版本进行打包推送到本仓库
-脚本自动化仓库：https://github.com/moxyis/fpk-napcatqq
-EOF
-            sed -i "s/__VERSION__/${{ steps.remote_ver.outputs.remote_version }}/g" README.md
-            echo "创建README.md"
-          else
-            sed -i -E \
-              "s/(\|\s*\*\*NapCatQQ\*\*\s*\|\s*)[0-9.]+\s*(\|\s*NapCatQQ\/https:\/\/registry\.hub\.docker\.com\/v2\/repositories\/mlikiowa\/napcat-docker\/tags\s*\|)/\1${{ steps.remote_ver.outputs.remote_version }}\2/g" \
-              README.md
+      - name: 5. 提交并推送变更
+        run: |
+          cd FnDepot
+          
+          # 检查是否有变更
+          if git diff --quiet; then
+            echo "无版本更新，无需提交"
+            exit 0
           fi
           
-          echo "README.md更新完成：${{ steps.remote_ver.outputs.remote_version }}"
-          grep -A 1 -B 1 -i "napcat" README.md
-
-      - name: 16. 提交FnDepot变更
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        run: |
-          cd /tmp/FnDepot
-          
-          commit_msg="更新napcat-docker版本至${{ steps.remote_ver.outputs.remote_version }} (API: ${{ steps.remote_ver.outputs.total_tags }}标签/${{ steps.remote_ver.outputs.total_pages }}页)"
-          git add fpk-napcatqq/${{ steps.build_fpk.outputs.fpk_name }} fnpack.json README.md
-          git commit -m "$commit_msg" || echo "无需提交"
+          # 提交变更
+          git add README.md
+          git commit -m "chore: 更新NapCatQQ版本至${{ steps.get_version.outputs.latest_version }}"
           git push origin main
-          echo "FnDepot变更已推送"
-
-      - name: 17. 创建Release
-        if: ${{ steps.compare.outputs.need_update == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "napcat-docker-v${{ steps.remote_ver.outputs.remote_version }}-${{ steps.remote_ver.outputs.arch }}"
-          name: "napcat-docker v${{ steps.remote_ver.outputs.remote_version }}"
-          body: |
-            ## napcat-docker 自动打包更新
-            - 版本：v${{ steps.remote_ver.outputs.remote_version }}
-            - 原始Docker标签：v${{ steps.remote_ver.outputs.remote_version }}
-            - 平台架构：${{ steps.remote_ver.outputs.arch }}
-            - 打包格式：fpk
-            - 更新时间：${{ github.run_at }}
-            - 打包工具：fnpack 1.0.4
-            - 镜像哈希：${{ steps.remote_ver.outputs.remote_digest }}
-            - API统计：共获取 ${{ steps.remote_ver.outputs.total_pages }} 页，${{ steps.remote_ver.outputs.total_tags }} 个标签
-            - API地址：https://registry.hub.docker.com/v2/repositories/mlikiowa/napcat-docker/tags
-            - FnDepot仓库：https://github.com/moxyis/FnDepot/tree/main/fpk-napcatqq
-          prerelease: false
-          files: ${{ steps.build_fpk.outputs.fpk_release_file }}
-          overwrite: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+          echo "版本号已成功推送到FnDepot仓库"
