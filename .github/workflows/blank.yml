@@ -211,13 +211,21 @@ jobs:
           
           VERSION="${{ steps.remote_ver.outputs.remote_version }}"
           ARCH="Linux-AMD64"
+          # ① 带版本和架构的文件名（用于Release上传）
           FPK_VERSION_NAME="fpk-napcatqq-v${VERSION}-${ARCH}.fpk"
+          # ② 基础文件名（用于推送FnDepot）
+          FPK_BASE_NAME="fpk-napcatqq.fpk"
           mkdir -p /tmp/fpk_build
+          # 同时复制两个版本：带后缀的用于Release，无后缀的用于FnDepot
           cp "$FPK_FILE" "/tmp/fpk_build/$FPK_VERSION_NAME"
+          cp "$FPK_FILE" "/tmp/fpk_build/$FPK_BASE_NAME"
           
-          echo "✅ 打包完成：/tmp/fpk_build/$FPK_VERSION_NAME"
+          echo "✅ 打包完成："
+          echo "  - 带版本架构：/tmp/fpk_build/$FPK_VERSION_NAME"
+          echo "  - 基础文件名：/tmp/fpk_build/$FPK_BASE_NAME"
           echo "fpk_release_file=/tmp/fpk_build/$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
           echo "fpk_release_name=$FPK_VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "fpk_base_file=/tmp/fpk_build/$FPK_BASE_NAME" >> $GITHUB_OUTPUT  # 新增：输出无后缀文件名路径
 
       # ===================== 第四步：推送至FnDepot仓库 =====================
       - name: 12. 克隆FnDepot仓库
@@ -227,12 +235,13 @@ jobs:
           git clone "https://${{ secrets.FnDepot_PAT }}@github.com/moxyis/FnDepot.git" /tmp/FnDepot
           echo "✅ FnDepot仓库克隆完成"
 
-      - name: 13. 复制fpk文件到FnDepot
+      - name: 13. 复制fpk文件到FnDepot（使用基础文件名，不带版本和架构）
         if: steps.compare.outputs.need_update == 'true'
         run: |
           mkdir -p /tmp/FnDepot/fpk-napcatqq
-          cp "${{ steps.build_fpk.outputs.fpk_release_file }}" /tmp/FnDepot/fpk-napcatqq/
-          echo "✅ fpk文件已复制到FnDepot"
+          # ② 改用基础文件名复制，覆盖原有文件
+          cp "${{ steps.build_fpk.outputs.fpk_base_file }}" /tmp/FnDepot/fpk-napcatqq/
+          echo "✅ fpk文件（基础名称）已复制到FnDepot：fpk-napcatqq.fpk"
 
       - name: 14. 更新FnDepot的fnpack.json
         if: steps.compare.outputs.need_update == 'true'
