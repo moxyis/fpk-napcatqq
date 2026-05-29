@@ -73,6 +73,8 @@ jobs:
           BUILD_TIME=$(TZ='Asia/Shanghai' date "+%Y-%m-%d %H:%M:%S")
           echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
 
+          echo "APP_ID=$APP_ID"
+          echo "APP_NAME=$APP_NAME"
           echo "APP_PLATFORM=$APP_PLATFORM"
 
       - name: 4. 读取本地 manifest 版本
@@ -111,6 +113,7 @@ jobs:
 
           if [ -z "$ALL_VALID_TAGS" ]; then
             echo "❌ 未找到有效版本标签"
+            echo "$RAW_RESPONSE" | head -c 500
             exit 1
           fi
 
@@ -140,6 +143,9 @@ jobs:
           echo "remote_version=$REMOTE_VERSION" >> "$GITHUB_OUTPUT"
           echo "remote_digest=$REMOTE_DIGEST" >> "$GITHUB_OUTPUT"
 
+          echo "最新版本：[$REMOTE_VERSION]"
+          echo "最新digest：[${REMOTE_DIGEST:0:20}...]"
+
       - name: 6. 读取本地 digest
         id: local_digest
         run: |
@@ -152,6 +158,7 @@ jobs:
           LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\r\n' | xargs || true)
 
           echo "local_digest=$LOCAL_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "本地digest：[${LOCAL_DIGEST:0:20}...]"
 
       - name: 7. 判断是否需要更新
         id: compare
@@ -176,12 +183,16 @@ jobs:
 
           if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
             echo "need_update=true" >> "$GITHUB_OUTPUT"
+            echo "🔄 版本不一致，需要更新"
           elif [ -z "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ]; then
             echo "need_update=true" >> "$GITHUB_OUTPUT"
+            echo "🔄 本地 digest 为空，需要更新"
           elif [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ]; then
             echo "need_update=true" >> "$GITHUB_OUTPUT"
+            echo "🔄 digest 不一致，需要更新"
           else
             echo "need_update=false" >> "$GITHUB_OUTPUT"
+            echo "✅ 版本和 digest 一致，无需更新"
           fi
 
       - name: 8. 更新本地 manifest、platform 和 digest
@@ -223,14 +234,31 @@ jobs:
 
           FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
 
-          curl -L --retry 3 --connect-timeout 10 -o /tmp/fnpack "$FNPACK_URL"
+          echo "fnpack 下载地址：$FNPACK_URL"
+
+          HTTP_CODE=$(curl -L --retry 3 --connect-timeout 10 \
+            -w "%{http_code}" \
+            -o /tmp/fnpack \
+            "$FNPACK_URL")
+
+          echo "HTTP状态码：$HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ fnpack 下载失败"
+            head -n 20 /tmp/fnpack || true
+            exit 1
+          fi
 
           if head -n 1 /tmp/fnpack | grep -qiE '<!DOCTYPE|<html'; then
             echo "❌ 下载到的是 HTML，不是 fnpack 二进制"
+            head -n 20 /tmp/fnpack
             exit 1
           fi
 
           install -m 755 /tmp/fnpack /usr/local/bin/fnpack
+
+          which fnpack
+          file /usr/local/bin/fnpack
           fnpack --help | head -n 10 || true
 
       - name: 10. 执行 fnpack 打包
@@ -253,12 +281,16 @@ jobs:
           echo "打包目录：$BUILD_APP_DIR"
           find "$BUILD_ROOT" -maxdepth 3 -type d -print
 
+          rm -f ./*.fpk
+
           fnpack build --directory "$BUILD_APP_DIR"
 
-          FPK_FILE=$(find "$BUILD_APP_DIR" -maxdepth 1 -name "*.fpk" -type f | head -n1)
+          FPK_FILE=$(find "$PWD" -maxdepth 1 -name "*.fpk" -type f | head -n1)
 
           if [ -z "$FPK_FILE" ]; then
             echo "❌ 未生成 fpk 文件"
+            echo "当前目录：$PWD"
+            find "$PWD" -maxdepth 1 -type f
             find "$BUILD_APP_DIR" -type f
             exit 1
           fi
@@ -316,7 +348,6 @@ jobs:
           set -euo pipefail
 
           mkdir -p "/tmp/FnDepot/$FNDEPOT_APP_DIR"
-
           cp "${{ steps.build_fpk.outputs.fpk_base_file }}" "/tmp/FnDepot/$FNDEPOT_APP_DIR/"
 
           echo "✅ 已复制：${APP_ID}.fpk"
@@ -338,6 +369,7 @@ jobs:
             "$JSON_FILE" > "$JSON_FILE.tmp"
 
           mv "$JSON_FILE.tmp" "$JSON_FILE"
+          cat "$JSON_FILE"
 
       - name: 16. 生产模式：更新 FnDepot README
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
@@ -364,6 +396,8 @@ jobs:
               echo "| **${APP_NAME}** | ${VERSION} | ${DOCKER_IMAGE} | Docker |" >> "$README_FILE"
             fi
           fi
+
+          grep -A 1 "$APP_NAME" "$README_FILE" || true
 
       - name: 17. 生产模式：提交 FnDepot 变更
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
