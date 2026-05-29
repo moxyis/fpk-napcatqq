@@ -36,7 +36,7 @@ env:
 
   FNDEPOT_REPO: "moxyis/FnDepot"
   FNDEPOT_BRANCH: "main"
-  FNDEPOT_APP_DIR: "fpk-zflie"
+  FNDEPOT_APP_DIR: "fpk-napcatqq"
 
 jobs:
   build:
