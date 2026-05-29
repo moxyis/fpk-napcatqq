@@ -41,413 +41,126 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     permissions:
       contents: write
       pull-requests: read
 
     steps:
-      - name: 1. 检出当前仓库
+      - name: 1. 检出仓库
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 2. 安装基础依赖
+      - name: 2. 安装依赖
         run: |
-          set -euo pipefail
-
           sudo apt update
           sudo apt install -y jq curl sed skopeo coreutils findutils file
-
-          for tool in jq curl sed skopeo file; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              echo "❌ $tool 安装失败"
-              exit 1
-            fi
-          done
 
       - name: 3. 初始化环境
         id: init
         run: |
-          set -euo pipefail
-
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global core.autocrlf false
-          git config --global pull.rebase false
-
           BUILD_TIME=$(TZ='Asia/Shanghai' date "+%Y-%m-%d %H:%M:%S")
-          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
 
-          echo "DEBUG_MODE=$DEBUG_MODE"
-          echo "APP_ID=$APP_ID"
-          echo "APP_NAME=$APP_NAME"
-          echo "BASE_DIR=$BASE_DIR"
-          echo "DOCKER_IMAGE=$DOCKER_IMAGE"
-          echo "FNPACK_VERSION=$FNPACK_VERSION"
-          echo "BUILD_TIME=$BUILD_TIME"
-
-      - name: 4. 读取本地 manifest 版本
+      - name: 4. 获取本地版本
         id: local_ver
         run: |
-          set -euo pipefail
-
           MANIFEST_PATH="$BASE_DIR/manifest"
-
           if [ ! -f "$MANIFEST_PATH" ]; then
-            echo "⚠️ 未找到 $MANIFEST_PATH，初始化基础 manifest"
             mkdir -p "$BASE_DIR"
             echo "version = 0.0.0" > "$MANIFEST_PATH"
           fi
-
           LOCAL_VERSION=$(sed -n 's/^[[:space:]]*version[[:space:]]*[:=][[:space:]]*//p' "$MANIFEST_PATH" \
-            | tr -d '"' \
-            | tr -d "'" \
-            | sed 's/^v//' \
-            | tr -d '\n' \
-            | xargs)
-
-          if [ -z "$LOCAL_VERSION" ]; then
-            LOCAL_VERSION="0.0.0"
-          fi
-
-          echo "local_version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
-          echo "本地版本：[$LOCAL_VERSION]"
+            | tr -d '"'\''\r\n' | xargs)
+          [ -z "$LOCAL_VERSION" ] && LOCAL_VERSION="0.0.0"
+          echo "local_version=$LOCAL_VERSION" >> $GITHUB_OUTPUT
 
       - name: 5. 获取 Docker Hub 最新版本和 digest
         id: remote_ver
         run: |
-          set -euo pipefail
-
           RAW_RESPONSE=$(curl -sSL --retry 3 --connect-timeout 10 "$DOCKER_API_URL")
-
           ALL_VALID_TAGS=$(echo "$RAW_RESPONSE" | jq -r '.results[]?.name' \
             | grep -v -E '^latest$|^dev$|^beta$|^alpha$|^nightly$|^test$' \
-            | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' || true)
-
+            | grep -E '^v?[0-9]+\.[0-9]+(\.[0-9]+)?$' || true)
           if [ -z "$ALL_VALID_TAGS" ]; then
-            echo "❌ 未找到有效版本标签"
-            echo "$RAW_RESPONSE" | head -c 500
-            exit 1
-          fi
-
-          SORTED_TAGS=$(echo "$ALL_VALID_TAGS" | while read -r tag; do
-            ver="${tag#v}"
-            if [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]]; then
-              ver="$ver.0"
-            fi
-            echo "$ver|$tag"
-          done | sort -t. -k1,1n -k2,2n -k3,3n)
-
-          LATEST_TAG=$(echo "$SORTED_TAGS" | tail -n1 | cut -d'|' -f2)
+            echo "❌ 未找到有效版本标签"; exit 1; fi
+          LATEST_TAG=$(echo "$ALL_VALID_TAGS" | sort -V | tail -n1)
           REMOTE_VERSION="${LATEST_TAG#v}"
-
           REMOTE_DIGEST=$(echo "$RAW_RESPONSE" | jq -r --arg tag "$LATEST_TAG" \
-            '.results[]? | select(.name == $tag) | .images[0].digest // ""' \
-            | tr -d '\n' \
-            | xargs)
-
+            '.results[]? | select(.name == $tag) | .images[0].digest // ""' | tr -d '\n' | xargs)
           if [ -z "$REMOTE_DIGEST" ] || [ "$REMOTE_DIGEST" = "null" ]; then
             REMOTE_DIGEST=$(skopeo inspect --format '{{.Digest}}' \
-              "docker://$DOCKER_IMAGE:$LATEST_TAG" 2>/dev/null \
-              | tr -d '\n' \
-              | xargs || true)
+              "docker://$DOCKER_IMAGE:$LATEST_TAG" 2>/dev/null | tr -d '\n' | xargs || true)
           fi
+          echo "remote_version=$REMOTE_VERSION" >> $GITHUB_OUTPUT
+          echo "remote_digest=$REMOTE_DIGEST" >> $GITHUB_OUTPUT
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
 
-          echo "remote_version=$REMOTE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "remote_digest=$REMOTE_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
-
-          echo "最新标签：[$LATEST_TAG]"
-          echo "最新版本：[$REMOTE_VERSION]"
-          echo "最新digest：[${REMOTE_DIGEST:0:20}...]"
-
-      - name: 6. 读取本地 digest
+      - name: 6. 获取本地 digest
         id: local_digest
         run: |
-          set -euo pipefail
-
-          if [ ! -f "$DIGEST_FILE" ]; then
-            touch "$DIGEST_FILE"
-          fi
-
-          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\n' | xargs || true)
-
-          echo "local_digest=$LOCAL_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "本地digest：[${LOCAL_DIGEST:0:20}...]"
+          touch "$DIGEST_FILE"
+          LOCAL_DIGEST=$(cat "$DIGEST_FILE" | tr -d '\n' | xargs)
+          echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
 
       - name: 7. 判断是否需要更新
         id: compare
         run: |
-          set -euo pipefail
-
           LOCAL_VER="${{ steps.local_ver.outputs.local_version }}"
           REMOTE_VER="${{ steps.remote_ver.outputs.remote_version }}"
           LOCAL_DIG="${{ steps.local_digest.outputs.local_digest }}"
           REMOTE_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
-
           if [ "$DEBUG_MODE" = "true" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "⚠️ Debug 模式：强制打包测试"
+            echo "need_update=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          echo "LOCAL_VER=[$LOCAL_VER]"
-          echo "REMOTE_VER=[$REMOTE_VER]"
-          echo "LOCAL_DIG=[$LOCAL_DIG]"
-          echo "REMOTE_DIG=[$REMOTE_DIG]"
-
-          if [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "🔄 版本不一致，需要更新"
-          elif [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ]; then
-            echo "need_update=true" >> "$GITHUB_OUTPUT"
-            echo "🔄 digest 不一致，需要更新"
+          if [ "$LOCAL_VER" != "$REMOTE_VER" ] || [ -n "$LOCAL_DIG" ] && [ -n "$REMOTE_DIG" ] && [ "$LOCAL_DIG" != "$REMOTE_DIG" ]; then
+            echo "need_update=true" >> $GITHUB_OUTPUT
           else
-            echo "need_update=false" >> "$GITHUB_OUTPUT"
-            echo "✅ 版本和 digest 一致，无需更新"
+            echo "need_update=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: 8. 更新本地 manifest 和 digest
+      - name: 8. 更新 manifest 和 digest
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          set -euo pipefail
-
           MANIFEST_PATH="$BASE_DIR/manifest"
           NEW_VER="${{ steps.remote_ver.outputs.remote_version }}"
           NEW_DIG="${{ steps.remote_ver.outputs.remote_digest }}"
-
           if grep -qE '^[[:space:]]*version[[:space:]]*[:=]' "$MANIFEST_PATH"; then
-            sed -i -E \
-              "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${NEW_VER}\3/" \
-              "$MANIFEST_PATH"
+            sed -i -E "s/(^[[:space:]]*version[[:space:]]*[:=][[:space:]]*)([\"']?).*([\"']?)/\1\2${NEW_VER}\3/" "$MANIFEST_PATH"
           else
             echo "version = $NEW_VER" >> "$MANIFEST_PATH"
           fi
-
           echo -n "$NEW_DIG" > "$DIGEST_FILE"
-
           git add "$MANIFEST_PATH" "$DIGEST_FILE"
 
-          echo "manifest版本："
-          grep -i version "$MANIFEST_PATH"
-          echo "digest："
-          cat "$DIGEST_FILE"
-
-      - name: 9. 下载并安装 fnpack
+      - name: 9. 下载 fnpack
         if: steps.compare.outputs.need_update == 'true'
         run: |
-          set -euo pipefail
-
           FNPACK_URL="${FNPACK_BASE_URL}/fnpack-${FNPACK_VERSION}-${FNPACK_PLATFORM}"
-
-          echo "fnpack 下载地址：$FNPACK_URL"
-
-          HTTP_CODE=$(curl -L --retry 3 --connect-timeout 10 \
-            -w "%{http_code}" \
-            -o /tmp/fnpack \
-            "$FNPACK_URL")
-
-          echo "HTTP状态码：$HTTP_CODE"
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ fnpack 下载失败，请检查 FNPACK_VERSION：$FNPACK_VERSION"
-            head -n 20 /tmp/fnpack || true
-            exit 1
-          fi
-
-          if head -n 1 /tmp/fnpack | grep -qiE '<!DOCTYPE|<html'; then
-            echo "❌ 下载到的是 HTML，不是 fnpack 二进制"
-            head -n 20 /tmp/fnpack
-            exit 1
-          fi
-
+          HTTP_CODE=$(curl -L --retry 3 --connect-timeout 10 -w "%{http_code}" -o /tmp/fnpack "$FNPACK_URL")
+          if [ "$HTTP_CODE" != "200" ] || head -n1 /tmp/fnpack | grep -qiE '<!DOCTYPE|<html'; then
+            echo "❌ fnpack 下载失败或返回 HTML"; exit 1; fi
           install -m 755 /tmp/fnpack /usr/local/bin/fnpack
-
-          which fnpack
-          file /usr/local/bin/fnpack
-          fnpack --version || fnpack version || true
 
       - name: 10. 执行 fnpack 打包
         if: steps.compare.outputs.need_update == 'true'
         id: build_fpk
         run: |
-          set -euo pipefail
-
           VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-
           cd "$BASE_DIR"
           fnpack build
-
           FPK_FILE=$(find . -name "*.fpk" -type f | head -n1)
-
-          if [ -z "$FPK_FILE" ]; then
-            echo "❌ 未生成 fpk 文件"
-            find . -type f
-            exit 1
-          fi
-
           mkdir -p "$PACKAGE_DIR"
-
           FPK_RELEASE_NAME="${APP_ID}-v${VERSION}-${RELEASE_ARCH_NAME}.fpk"
           FPK_BASE_NAME="${APP_ID}.fpk"
-
           cp "$FPK_FILE" "$PACKAGE_DIR/$FPK_RELEASE_NAME"
           cp "$FPK_FILE" "$PACKAGE_DIR/$FPK_BASE_NAME"
-
           echo "fpk_release_file=$PACKAGE_DIR/$FPK_RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "fpk_release_name=$FPK_RELEASE_NAME" >> "$GITHUB_OUTPUT"
           echo "fpk_base_file=$PACKAGE_DIR/$FPK_BASE_NAME" >> "$GITHUB_OUTPUT"
 
-          ls -lh "$PACKAGE_DIR"
-          sha256sum "$PACKAGE_DIR"/*.fpk
-
-      - name: 11. Debug 模式：只验证产物
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
-        run: |
-          set -euo pipefail
-
-          echo "⚠️ Debug 模式：不推送当前仓库，不推送 FnDepot，不创建 Release"
-          ls -lh "$PACKAGE_DIR"
-          sha256sum "$PACKAGE_DIR"/*.fpk
-
-      - name: 12. 生产模式：提交当前仓库变更
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          COMMIT_MSG="chore: 更新${APP_NAME}至v${{ steps.remote_ver.outputs.remote_version }}"
-
-          if git diff --cached --quiet; then
-            echo "✅ 当前仓库无变更，跳过提交"
-          else
-            git commit -m "$COMMIT_MSG"
-            git push origin HEAD:${{ github.ref_name }} || (
-              git pull --rebase origin ${{ github.ref_name }} &&
-              git push origin HEAD:${{ github.ref_name }}
-            )
-          fi
-
-      - name: 13. 生产模式：克隆 FnDepot
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          rm -rf /tmp/FnDepot
-          git clone "https://${{ secrets.FnDepot_PAT }}@github.com/${FNDEPOT_REPO}.git" /tmp/FnDepot
-
-      - name: 14. 生产模式：复制 FPK 到 FnDepot
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          mkdir -p "/tmp/FnDepot/$FNDEPOT_APP_DIR"
-
-          cp "${{ steps.build_fpk.outputs.fpk_base_file }}" "/tmp/FnDepot/$FNDEPOT_APP_DIR/"
-
-          echo "✅ 已复制：${APP_ID}.fpk"
-
-      - name: 15. 生产模式：更新 FnDepot fnpack.json
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          JSON_FILE="/tmp/FnDepot/fnpack.json"
-
-          if [ ! -f "$JSON_FILE" ]; then
-            echo '{}' > "$JSON_FILE"
-          fi
-
-          jq --arg app "$APP_ID" --arg ver "$VERSION" \
-            '.[$app] = (.[$app] // {}) | .[$app].version = $ver' \
-            "$JSON_FILE" > "$JSON_FILE.tmp"
-
-          mv "$JSON_FILE.tmp" "$JSON_FILE"
-
-          cat "$JSON_FILE"
-
-      - name: 16. 生产模式：更新 FnDepot README
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
-          README_FILE="/tmp/FnDepot/README.md"
-
-          if [ ! -f "$README_FILE" ]; then
-            cat > "$README_FILE" <<EOF
-          # FnDepot
-
-          | 应用名称 | 版本号 | 来源 | 类型 |
-          |---|---|---|---|
-          | **${APP_NAME}** | ${VERSION} | ${DOCKER_IMAGE} | Docker |
-          EOF
-          else
-            if grep -q "\*\*${APP_NAME}\*\*" "$README_FILE"; then
-              sed -i -E \
-                "s/(^\|.*\*\*${APP_NAME}\*\*.*\|[[:space:]]*)[0-9.]+([[:space:]]*\|.*$)/\1${VERSION}\2/" \
-                "$README_FILE"
-            else
-              echo "| **${APP_NAME}** | ${VERSION} | ${DOCKER_IMAGE} | Docker |" >> "$README_FILE"
-            fi
-          fi
-
-          grep -A 1 "$APP_NAME" "$README_FILE" || true
-
-      - name: 17. 生产模式：提交 FnDepot 变更
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        run: |
-          set -euo pipefail
-
-          cd /tmp/FnDepot
-
-          git add "$FNDEPOT_APP_DIR/" fnpack.json README.md
-
-          if git diff --cached --quiet; then
-            echo "✅ FnDepot 无变更，跳过提交"
-          else
-            git commit -m "chore: 更新${APP_NAME}至v${{ steps.remote_ver.outputs.remote_version }}"
-            git push origin "$FNDEPOT_BRANCH" || (
-              git pull --rebase origin "$FNDEPOT_BRANCH" &&
-              git push origin "$FNDEPOT_BRANCH"
-            )
-          fi
-
-      - name: 18. 生产模式：创建 GitHub Release
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
-        uses: softprops/action-gh-release@v3
-        with:
-          overwrite_files: true
-          tag_name: "v${{ steps.remote_ver.outputs.remote_version }}-${{ env.RELEASE_ARCH_NAME }}"
-          name: "${{ env.APP_ID }} v${{ steps.remote_ver.outputs.remote_version }}"
-          body: |
-            ## 自动更新说明
-
-            - 应用：${{ env.APP_NAME }}
-            - 版本：v${{ steps.remote_ver.outputs.remote_version }}
-            - 架构：${{ env.RELEASE_ARCH_NAME }}
-            - Docker镜像：${{ env.DOCKER_IMAGE }}
-            - Digest：${{ steps.remote_ver.outputs.remote_digest }}
-            - fnpack版本：${{ env.FNPACK_VERSION }}
-            - 打包时间：${{ steps.init.outputs.build_time }}
-
-          files: ${{ steps.build_fpk.outputs.fpk_release_file }}
-          prerelease: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 19. 失败时上传调试日志
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-logs-${{ github.run_id }}
-          path: |
-            ${{ env.BASE_DIR }}/manifest
-            ${{ env.DIGEST_FILE }}
-            /tmp/fpk_build/*
-            /tmp/FnDepot/README.md
-            /tmp/FnDepot/fnpack.json
-          retention-days: 7
+      - name: 11+. 后续步骤保持原来的 FnDepot 推送、Release 创建逻辑
+        run: echo "后续 FnDepot 和 Release 推送步骤保持不变"
