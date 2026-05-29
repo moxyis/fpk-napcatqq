@@ -31,7 +31,7 @@ env:
   FNPACK_BASE_URL: "https://static2.fnnas.com/fnpack"
 
   PACKAGE_DIR: "/tmp/fpk_build"
-  RELEASE_ARCH_NAME: "Linux-AMD64"
+  RELEASE_ARCH_NAME: "all"
 
   FNDEPOT_REPO: "moxyis/FnDepot"
   FNDEPOT_BRANCH: "main"
