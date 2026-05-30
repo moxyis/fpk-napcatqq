@@ -5,11 +5,11 @@ services:
         environment:
             - NAPCAT_UID=${NAPCAT_UID}
             - NAPCAT_GID=${NAPCAT_GID}
-            - WEBUI_TOKEN=qq123456
+            - WEBUI_TOKEN=${WIZARD_ADMIN_PASSWORD}
         ports:
-            - 3000:3000
-            - 3001:3001
-            - "${TRIM_SERVICE_PORT}:6099"
+            - "${APP_PORTA}:3000"
+            - "${APP_PORTB}:3001"
+            - "${APP_PORT}:6099"
         volumes:
             - "/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/config:/app/napcat/config"
             - "/${TRIM_APPDEST_VOL}/@appshare/${TRIM_APPNAME}/ntqq:/app/.config/QQ"
