@@ -18,7 +18,7 @@
             {
         "type": "tips",
         "helpText": "默认管理密码是：qq123456"
-      }
+      },
             {
                 "type": "password",
                 "field": "wizard_admin_password",
