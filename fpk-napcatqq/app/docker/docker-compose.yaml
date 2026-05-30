@@ -5,7 +5,7 @@ services:
         environment:
             - NAPCAT_UID=${NAPCAT_UID}
             - NAPCAT_GID=${NAPCAT_GID}
-            - WEBUI_TOKEN=${WIZARD_ADMIN_PASSWORD}
+            - WEBUI_TOKEN=${wizard_admin_password}
         ports:
             - "${app_porta}:3000"
             - "${app_portb}:3001"
