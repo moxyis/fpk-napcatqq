@@ -8,6 +8,7 @@ source                = thirdparty
 maintainer            = NapNeko
 maintainer_url	      = https://napcat.napneko.icu/
 distributor           = moxyis
+distributor_url       = https://github.com/moxyis/
 desktop_uidir         = ui
 desktop_applaunchname = fpk-napcatqq.Application
 
