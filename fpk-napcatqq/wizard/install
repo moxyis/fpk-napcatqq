@@ -16,9 +16,14 @@
     "stepTitle": "应用设置",
     "items": [
             {
+        "type": "tips",
+        "helpText": "默认管理密码是：qq123456"
+      }
+            {
                 "type": "password",
                 "field": "wizard_admin_password",
                 "label": "管理员密码",
+                "initValue": "qq123456",
                 "rules": [
                     {
                         "required": true,
@@ -34,6 +39,7 @@
                 "type": "password",
                 "field": "wizard_admin_password_confirm",
                 "label": "确认密码",
+                "initValue": "qq123456",
                 "rules": [
                     {
                         "required": true,
