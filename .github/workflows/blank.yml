@@ -261,61 +261,74 @@ jobs:
           file /usr/local/bin/fnpack
           fnpack --help | head -n 10 || true
 
-      - name: 10. 执行 fnpack 打包
-        if: steps.compare.outputs.need_update == 'true'
-        id: build_fpk
+      - name: 推送 FPK 到 FnDepot
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
 
           VERSION="${{ steps.remote_ver.outputs.remote_version }}"
+          SOURCE="${{ steps.build_fpk.outputs.fpk_base_file }}"
+          TARGET="/tmp/FnDepot/$FNDEPOT_APP_DIR"
 
-          BUILD_ROOT="/tmp/fpk-packages"
-          BUILD_APP_DIR="$BUILD_ROOT/$APP_PLATFORM/$APP_ID"
+          test -s "$SOURCE"
+          mkdir -p "$TARGET/versions"
 
-          rm -rf "$BUILD_ROOT" "$PACKAGE_DIR"
-          mkdir -p "$(dirname "$BUILD_APP_DIR")"
-          mkdir -p "$PACKAGE_DIR"
+          # 保持原有固定下载文件
+          cp "$SOURCE" "$TARGET/${APP_ID}.fpk"
 
-          cp -a "$BASE_DIR" "$BUILD_APP_DIR"
+          # 保留当前版本的独立安装包
+          cp "$SOURCE" \
+            "$TARGET/versions/${APP_ID}-v${VERSION}.fpk"
 
-          echo "打包目录：$BUILD_APP_DIR"
-          find "$BUILD_ROOT" -maxdepth 3 -type d -print
+          echo "FPK 保存成功：$APP_ID $VERSION"
 
-          rm -f ./*.fpk
-
-          fnpack build --directory "$BUILD_APP_DIR"
-
-          FPK_FILE=$(find "$PWD" -maxdepth 1 -name "*.fpk" -type f | head -n1)
-
-          if [ -z "$FPK_FILE" ]; then
-            echo "❌ 未生成 fpk 文件"
-            echo "当前目录：$PWD"
-            find "$PWD" -maxdepth 1 -type f
-            find "$BUILD_APP_DIR" -type f
-            exit 1
-          fi
-
-          FPK_RELEASE_NAME="${APP_ID}-v${VERSION}-${RELEASE_ARCH_NAME}.fpk"
-          FPK_BASE_NAME="${APP_ID}.fpk"
-
-          cp "$FPK_FILE" "$PACKAGE_DIR/$FPK_RELEASE_NAME"
-          cp "$FPK_FILE" "$PACKAGE_DIR/$FPK_BASE_NAME"
-
-          echo "fpk_release_file=$PACKAGE_DIR/$FPK_RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "fpk_release_name=$FPK_RELEASE_NAME" >> "$GITHUB_OUTPUT"
-          echo "fpk_base_file=$PACKAGE_DIR/$FPK_BASE_NAME" >> "$GITHUB_OUTPUT"
-
-          ls -lh "$PACKAGE_DIR"
-          sha256sum "$PACKAGE_DIR"/*.fpk
-
-      - name: 11. Debug 模式：只验证产物
-        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'true'
+      - name: 更新 FnDepot V2 应用源
+        if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
         run: |
           set -euo pipefail
 
-          echo "⚠️ Debug 模式：不推送当前仓库，不推送 FnDepot，不创建 Release"
-          ls -lh "$PACKAGE_DIR"
-          sha256sum "$PACKAGE_DIR"/*.fpk
+          VERSION="${{ steps.remote_ver.outputs.remote_version }}"
+          JSON_FILE="/tmp/FnDepot/fnpack.json"
+          FPK_FILE="/tmp/FnDepot/$FNDEPOT_APP_DIR/versions/${APP_ID}-v${VERSION}.fpk"
+
+          test -s "$FPK_FILE"
+          test -f "$JSON_FILE"
+
+          jq -e '.schema_version == "2" and (.apps | type == "object")' "$JSON_FILE" >/dev/null
+          jq -e --arg app "$APP_ID" '.apps[$app] | type == "object"' "$JSON_FILE" >/dev/null
+
+          SIZE=$(stat -c%s "$FPK_FILE")
+          SHA256=$(sha256sum "$FPK_FILE" | cut -d' ' -f1)
+          URL="./${APP_ID}/versions/${APP_ID}-v${VERSION}.fpk"
+
+          jq \
+            --arg app "$APP_ID" \
+            --arg ver "$VERSION" \
+            --arg url "$URL" \
+            --arg sha "$SHA256" \
+            --argjson size "$SIZE" \
+            '
+            .apps[$app].releases = (.apps[$app].releases // {}) |
+            .apps[$app].releases[$ver] = {
+              "changelog": ("自动构建更新至 " + $ver),
+              "packages": {
+                "all": {
+                  "download_url": $url,
+                  "size": $size,
+                  "sha256": $sha
+                }
+              }
+            }
+            ' "$JSON_FILE" > "$JSON_FILE.tmp"
+
+          jq -e --arg app "$APP_ID" --arg ver "$VERSION" \
+            '.schema_version == "2" and
+             (.apps[$app].releases[$ver].packages.all.download_url | type == "string")' \
+            "$JSON_FILE.tmp" >/dev/null
+
+          mv "$JSON_FILE.tmp" "$JSON_FILE"
+
+          echo "FnDepot V2 更新完成：$APP_ID $VERSION"
 
       - name: 12. 生产模式：提交当前仓库变更
         if: steps.compare.outputs.need_update == 'true' && env.DEBUG_MODE == 'false'
